@@ -20,6 +20,7 @@ from src.integrations.alpaca import get_alpaca_client, safe_json_dumps
 from src.utils.llm import call_llm
 import logging
 from datetime import datetime
+import re
 
 # --- Define Pydantic Models ---
 class PortfolioDecision(BaseModel):
@@ -248,6 +249,12 @@ class PortfolioManager:
         
         for position in positions:
             symbol = position['symbol']
+
+            # --- Check if it's an options symbol --- 
+            # Basic OCC format check: Root(1-6 chars) + YYMMDD + C/P + Strike(8 digits)
+            is_option = bool(re.match(r"^[A-Z]{1,6}(\d{6})([CP])(\d{8})$", symbol))
+            # ----------------------------------------
+
             entry_price = float(position['avg_entry_price'])
             current_price = float(position['current_price'])
             quantity = int(position['qty'])
@@ -281,11 +288,26 @@ class PortfolioManager:
             position_value = float(position['market_value'])
             weight = (position_value / portfolio_value) * 100 if portfolio_value > 0 else 0
             
-            # Get volatility
-            volatility = self._calculate_volatility(symbol)
-            
-            # Get current market data
-            market_data = self._get_market_data(symbol)
+            # --- Skip stock-specific data for options --- 
+            volatility = 0.0
+            market_data = {}
+            if not is_option:
+                volatility = self._calculate_volatility(symbol)
+                market_data = self._get_market_data(symbol)
+            else:
+                 # Option-specific data might be fetched here if needed in the future
+                 # For now, use defaults or data already in 'position'
+                 market_data = {
+                     'price': current_price, # Use price from position data
+                     'volume': 0,
+                     'high': current_price,
+                     'low': current_price,
+                     'open': current_price,
+                     'close': current_price,
+                     'vwap': current_price,
+                     'timestamp': datetime.now().isoformat()
+                 }
+            # -------------------------------------------
             
             # Determine if scaling is appropriate
             scale_in = profit_loss_pct < -self.config['scaling_threshold_pct'] * 100 if side == 'long' else profit_loss_pct > self.config['scaling_threshold_pct'] * 100
@@ -754,7 +776,8 @@ class PortfolioManager:
         # Get portfolio value and cash
         portfolio_value = portfolio_state['portfolio_value']
         cash = portfolio_state['cash']
-        positions = {p['symbol']: p for p in portfolio_state['positions']}
+        # Directly use the dictionary provided by get_portfolio_state
+        positions = portfolio_state.get('positions', {}) # Use .get for safety
         
         # Check overall portfolio risk
         max_drawdown_reached = self._check_drawdown_threshold(portfolio_state)
@@ -916,7 +939,8 @@ class PortfolioManager:
         # Get portfolio value and cash
         portfolio_value = portfolio_state['portfolio_value']
         cash = portfolio_state['cash']
-        positions = {p['symbol']: p for p in portfolio_state['positions']}
+        # Directly use the dictionary provided by get_portfolio_state
+        positions = portfolio_state.get('positions', {}) # Use .get for safety
         
         # --- Get Pending Order Quantities ---
         all_orders = self.portfolio_cache.get('orders', [])

@@ -502,7 +502,7 @@ def print_portfolio_status(portfolio_state: dict) -> None:
         # Don't return early, still show pending orders
     else:
         position_table_data = []
-        for pos in positions:
+        for pos in positions.values():
             symbol = pos.get("symbol", "?")
             side = pos.get("side", "?").upper()
             qty = float(pos.get("qty", 0))
@@ -692,17 +692,20 @@ def print_options_positions(positions: Dict[str, Dict]) -> None:
         return
     
     table_data = []
-    for symbol, position in positions.items():
-        underlying = position.get('underlying', '')
-        option_type = position.get('option_type', '').upper()
-        strike = position.get('strike_price', 0)
-        expiration = position.get('expiration_date', '')
-        quantity = position.get('qty', 0)
-        entry_price = position.get('avg_entry_price', 0)
-        current_price = position.get('current_price', 0)
-        market_value = position.get('market_value', 0)
-        unrealized_pl = position.get('unrealized_pl', 0)
-        days_to_exp = position.get('days_to_expiration', 0)
+    # Iterate over the VALUES (position dictionaries)
+    for pos in positions.values():
+        symbol = pos.get("symbol", "?")
+        # Get option specific details directly from pos dictionary
+        underlying = pos.get('underlying', '') 
+        option_type = pos.get('option_type', '').upper()
+        strike = pos.get('strike_price', 0)
+        expiration = pos.get('expiration_date', '')
+        quantity = pos.get('qty', 0)
+        entry_price = pos.get('avg_entry_price', 0)
+        current_price = pos.get('current_price', 0)
+        market_value = pos.get('market_value', 0)
+        unrealized_pl = pos.get('unrealized_pl', 0)
+        days_to_exp = pos.get('days_to_expiration', 0)
         
         # Format the description
         strike_exp = f"{strike:.2f} {option_type} {expiration}"
@@ -711,9 +714,10 @@ def print_options_positions(positions: Dict[str, Dict]) -> None:
         pl_color = Fore.GREEN if unrealized_pl >= 0 else Fore.RED
         
         table_data.append([
-            f"{Fore.CYAN}{underlying}{Style.RESET_ALL}",
+            # Use underlying symbol for the first column as intended
+            f"{Fore.CYAN}{underlying if underlying else symbol}{Style.RESET_ALL}",
             f"{Fore.WHITE}{strike_exp}{Style.RESET_ALL}",
-            f"{Fore.WHITE}{quantity}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{quantity:,.0f}{Style.RESET_ALL}",
             f"{Fore.WHITE}${entry_price:.2f}{Style.RESET_ALL}",
             f"{Fore.WHITE}${current_price:.2f}{Style.RESET_ALL}",
             f"{Fore.WHITE}${market_value:.2f}{Style.RESET_ALL}",
