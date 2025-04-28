@@ -47,7 +47,6 @@ class OptionsContractDecision(BaseModel):
     ticker: str = Field(description="The option contract ticker")
     underlying_ticker: str = Field(description="The underlying stock ticker")
     action: Literal["buy", "sell", "close"] = Field(description="Action to take on the contract")
-    quantity: int = Field(description="Number of contracts to trade")
     option_type: Literal["call", "put"] = Field(description="Type of option (call or put)")
     strike_price: float = Field(description="Strike price of the option")
     expiration_date: str = Field(description="Expiration date of the option (YYYY-MM-DD)")
@@ -93,10 +92,10 @@ def options_analysis_agent(state: AgentState):
         stock_decision = trading_decisions[ticker]
         
         # Skip if no action or hold
-        if stock_decision.get("action", "hold").lower() == "hold" or stock_decision.get("quantity", 0) <= 0:
+        if stock_decision.get("action", "hold").lower() == "hold": 
             options_decisions[ticker] = {
                 "action": "none",
-                "reasoning": "No stock action or holding position - no options strategy applied"
+                "reasoning": "Stock action is 'hold' - no options strategy applied"
             }
             continue
             
@@ -402,7 +401,6 @@ def select_optimal_contract(
             - ticker: The option contract ticker
             - underlying_ticker: The underlying stock ticker
             - action: "buy" or "sell" the contract
-            - quantity: Always set this to 1. The final quantity will be determined by risk management later.
             - option_type: "call" or "put"
             - strike_price: Strike price of the contract
             - expiration_date: Expiration date (YYYY-MM-DD format)
@@ -435,12 +433,11 @@ def select_optimal_contract(
             {contracts_data}
             ```
             
-            Select the optimal contract and return a contract decision in this exact JSON format:
+            Select the optimal contract and return a contract decision in this exact JSON format (DO NOT include quantity):
             {{
                 "ticker": "string",
                 "underlying_ticker": "{ticker}",
                 "action": "buy|sell|close",
-                "quantity": 1,
                 "option_type": "call|put",
                 "strike_price": float,
                 "expiration_date": "YYYY-MM-DD",
@@ -471,23 +468,11 @@ def select_optimal_contract(
     
     # Define default contract decision
     def create_default_contract_decision():
-        return OptionsContractDecision(
-            ticker="",
-            underlying_ticker=ticker,
-            action="buy" if options_strategy.strategy_type in ["long_call", "long_put"] else "sell",
-            quantity=0,
-            option_type="call" if options_strategy.strategy_type in ["long_call", "covered_call"] else "put",
-            strike_price=0.0,
-            expiration_date=datetime.now().strftime("%Y-%m-%d"),
-            strategy=options_strategy.strategy_type,
-            confidence=0.0,
-            reasoning="Error in contract selection analysis, no valid contract selected",
-            limit_price=None,
-            stop_loss=None,
-            take_profit=None,
-            max_position_value=0.0,
-            greeks={"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
-        )
+        # This default needs to be valid according to the Pydantic model (without quantity)
+        # It's only used on LLM error, returning None might be better if critical fields are missing.
+        # For now, returning None on error to avoid potential issues downstream.
+        logger.error("LLM call failed in select_optimal_contract. Returning None.")
+        return None
     
     # Use LLM to select the optimal contract
     return call_llm(

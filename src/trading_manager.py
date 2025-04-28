@@ -73,7 +73,7 @@ def check_env_setup():
 from src.integrations.alpaca import get_alpaca_client
 from src.portfolio.manager import PortfolioManager
 from src.main import run_hedge_fund
-from src.utils.display import print_trading_output, print_execution_summary, print_portfolio_status
+from src.utils.display import print_trading_output, print_execution_summary, print_portfolio_status, print_options_analysis_summary
 from src.utils.analysts import ANALYST_ORDER
 from src.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelProvider
 from src.utils.ollama import ensure_ollama_and_model
@@ -285,9 +285,10 @@ class TradingManager:
         """
         Run a complete trading cycle:
         1. Get current portfolio state
-        2. Run AI analysis
-        3. Execute trading decisions
-        4. Log results
+        2. Run AI analysis for stock decisions
+        3. Run Options analysis (if enabled)
+        4. Execute combined decisions (stock & options) via PortfolioManager
+        5. Log results
         
         Returns:
             Dict with results of the trading cycle.
@@ -325,10 +326,9 @@ class TradingManager:
             
             # Get current portfolio state from Alpaca
             try:
-                portfolio_state = self.portfolio_manager.get_portfolio_state()
-                
-                logger.info("Portfolio state retrieved. Cash: $%.2f, Portfolio Value: $%.2f", 
-                            portfolio_state['cash'], portfolio_state['portfolio_value'])
+                initial_portfolio_state = self.portfolio_manager.get_portfolio_state()
+                logger.info("Initial portfolio state retrieved. Cash: $%.2f, Portfolio Value: $%.2f", 
+                            initial_portfolio_state['cash'], initial_portfolio_state['portfolio_value'])
             except Exception as e:
                 error_msg = str(e).lower()
                 if "forbidden" in error_msg or "unauthorized" in error_msg:
@@ -344,125 +344,147 @@ class TradingManager:
                     logger.error("Error retrieving portfolio state: %s", str(e))
                     raise
             
-            # Set dates for analysis
-            end_date = datetime.now().strftime("%Y-%m-%d")
-            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-            
-            # Run AI analysis using the Hedge Fund
+            # Run AI analysis for stock decisions
             start_time = time.time()
-            
-            # Get the AI-formatted portfolio state for context
-            ai_portfolio_context = portfolio_state
-
+            ai_portfolio_context = initial_portfolio_state # Use initial state for analysis context
             # Run AI analysis (graph execution + final synthesis via PortfolioManager method)
             ai_result = run_hedge_fund(
                 tickers=self.tickers,
-                start_date=start_date,
-                end_date=end_date,
-                portfolio=ai_portfolio_context, # Pass context state
-                portfolio_manager=self.portfolio_manager, # Pass the manager instance
+                start_date=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"),
+                end_date=datetime.now().strftime("%Y-%m-%d"),
+                portfolio=ai_portfolio_context,
+                portfolio_manager=self.portfolio_manager,
                 show_reasoning=self.show_reasoning,
                 selected_analysts=self.selected_analysts,
                 model_name=self.model_name,
                 model_provider=self.model_provider,
             )
-            
             analysis_time = time.time() - start_time
-            logger.info("AI analysis completed in %.2f seconds", analysis_time)
+            logger.info("Stock AI analysis completed in %.2f seconds", analysis_time)
+            stock_decisions = ai_result.get("decisions", {}) # Get quantity-less stock decisions
+            print_trading_output(ai_result) # Print stock analysis summary
             
-            # Print AI trading output
-            print_trading_output(ai_result)
-            
-            # Execute trading decisions
-            decisions = ai_result["decisions"]
-            execution_results = self.portfolio_manager.execute_decision(decisions)
-            
-            # Print Execution Summary Table
-            print_execution_summary(execution_results)
-            
-            logger.info("Trading decisions executed: %s", json.dumps(execution_results, default=json_serial))
-            
-            # Execute options analysis and decisions
+            # Run Options analysis (if enabled)
+            options_decisions = {} # Initialize as empty
             if self.portfolio_manager.config.get('enable_options', True):
+                logger.info("Running options analysis based on stock decisions...")
                 try:
-                    # Run options analysis
-                    logger.info("Running options analysis based on stock decisions")
-                    
-                    # Import options analysis agent
                     from src.agents.options_analysis import options_analysis_agent
-
-                    # Construct the state dictionary expected by the options agent
+                    # Construct state, passing the *result* of stock analysis
                     state_for_options = {
                         "data": {
-                            "tickers": self.tickers,  # Use tickers from TradingManager
-                            "analyst_signals": ai_result.get("analyst_signals", {}), # Get from ai_result
-                            "decisions": ai_result.get("decisions", {}), # Get from ai_result
-                            # Add other data from ai_result if needed by the agent
+                            "tickers": self.tickers,
+                            "analyst_signals": ai_result.get("analyst_signals", {}),
+                            "decisions": stock_decisions, # Pass the generated stock decisions
                         },
                         "metadata": {
-                            "model_name": self.model_name, # Use from TradingManager
-                            "model_provider": self.model_provider, # Use from TradingManager
-                            "show_reasoning": self.show_reasoning # Use from TradingManager
+                            "model_name": self.model_name,
+                            "model_provider": self.model_provider,
+                            "show_reasoning": self.show_reasoning
                         },
-                        "messages": [] # Placeholder
+                        "messages": []
                     }
-
-                    # Run options analysis with the constructed state
                     options_result = options_analysis_agent(state_for_options)
-                    options_decisions = options_result["data"]["options_decisions"]
-
-                    # Log options decisions
-                    logger.info("Options decisions generated: %s", json.dumps(options_decisions, default=json_serial))
-                    
-                    # Execute options decisions
-                    options_execution_results = self.portfolio_manager.execute_options_decision(options_decisions)
-                    
-                    # Log options execution results
-                    logger.info("Options decisions executed: %s", json.dumps(options_execution_results, default=json_serial))
-                    
-                    # Add to results
+                    options_decisions = options_result.get("data", {}).get("options_decisions", {})
+                    print_options_analysis_summary(options_decisions) # Print the new table
+                    # Store options decisions in ai_result for logging later
                     ai_result["options_decisions"] = options_decisions
-                    ai_result["options_execution_results"] = options_execution_results
-                    
-                    # Get options portfolio state
-                    options_portfolio_state = self.portfolio_manager.get_options_portfolio_state()
-                    ai_result["options_portfolio"] = options_portfolio_state
-                    
                 except Exception as e:
-                    logger.error(f"Error in options analysis and execution: {e}")
+                    logger.error(f"Error in options analysis: {e}")
                     traceback.print_exc()
+            else:
+                logger.info("Options trading is disabled. Skipping options analysis.")
+
+            # Execute combined decisions (stock & options) via PortfolioManager
+            stock_execution_results = {}
+            option_execution_results = {}
+            combined_execution_results = {} # For overall summary
+
+            # We need to iterate through all involved tickers (from stock and options decisions)
+            all_tickers = set(stock_decisions.keys()) | set(options_decisions.keys())
             
-            # --- Add Delay --- 
-            # Wait for orders to potentially fill before fetching final state
-            sleep_duration = 30 # seconds - increased to give more time for orders to fill
-            logger.info(f"Waiting {sleep_duration} seconds for orders to fill before updating portfolio status...")
-            time.sleep(sleep_duration) 
-            # --- End Delay --- 
+            if not all_tickers:
+                 logger.info("No stock or option decisions generated. Nothing to execute.")
+            else:
+                 logger.info(f"Processing combined execution for tickers: {list(all_tickers)}")
+                 for ticker in all_tickers:
+                     # Get the specific stock/option decision for this ticker (or None)
+                     current_stock_decision = stock_decisions.get(ticker)
+                     # Option decisions might be keyed differently (e.g., underlying ticker)
+                     # Assuming options_decisions keys are suitable for lookup for now.
+                     # If options are keyed by underlying, adjust lookup here.
+                     current_option_decision = options_decisions.get(ticker)
+
+                     # Prepare decisions with the ticker key added *inside* the dictionary
+                     stock_decision_for_exec = None
+                     if current_stock_decision:
+                         stock_decision_for_exec = current_stock_decision.copy()
+                         stock_decision_for_exec['ticker'] = ticker # Add ticker key
+
+                     option_decision_for_exec = None
+                     if current_option_decision:
+                         option_decision_for_exec = current_option_decision.copy()
+                         # The 'ticker' field inside current_option_decision already holds the correct
+                         # option contract ticker (e.g., O:VALE...). Do not overwrite it.
+
+                     if not stock_decision_for_exec and not option_decision_for_exec:
+                          continue # Should not happen if ticker came from the sets
+                          
+                     logger.info(f"Executing combined decision for ticker: {ticker}")
+                     stock_exec, option_exec = self.portfolio_manager.execute_combined_decision(
+                         stock_decision=stock_decision_for_exec,   # Pass dict with ticker inside
+                         option_decision=option_decision_for_exec # Pass dict with ticker inside
+                     )
+                     
+                     # Store results keyed by ticker for summary
+                     if stock_exec:
+                          stock_execution_results[ticker] = stock_exec 
+                          combined_execution_results[ticker] = stock_exec # Use stock result if available
+                     if option_exec:
+                          option_execution_results[ticker] = option_exec # Store separately
+                          # If only option trade, use its result for combined summary
+                          if ticker not in combined_execution_results:
+                              combined_execution_results[ticker] = option_exec 
+                          # If both, perhaps merge or prioritize? For now, stock result takes precedence in combined.
+
+                 # Print Execution Summary Table using combined results
+                 print_execution_summary(combined_execution_results)
+                 # --- ADDED: Print the dedicated Options Execution Summary --- 
+                 if option_execution_results:
+                     # Use the dedicated function for options execution results
+                     from src.utils.display import print_options_execution_summary # Ensure import
+                     print_options_execution_summary(option_execution_results)
+                     
+                 logger.info("Combined trading decisions executed.")
+                 logger.info(f"Stock Executions: {json.dumps(stock_execution_results, default=json_serial)}")
+                 logger.info(f"Option Executions: {json.dumps(option_execution_results, default=json_serial)}")
+
+            # Wait for orders to potentially fill
+            sleep_duration = 30
+            logger.info(f"Waiting {sleep_duration} seconds for orders to fill...")
+            time.sleep(sleep_duration)
             
-            # Force refresh the portfolio cache to ensure latest data
-            logger.info("Forcing portfolio cache refresh to get accurate post-trade state...")
+            # Force refresh portfolio cache
+            logger.info("Forcing portfolio cache refresh...")
             self.portfolio_manager.update_portfolio_cache(force=True)
             
-            # Get final portfolio state *after* executions with forced refresh
+            # Get final portfolio state
             final_portfolio_state = self.portfolio_manager.get_portfolio_state()
-            logger.info("Final portfolio state retrieved after trade execution")
-            
-            # Print Final Portfolio Status Table
+            logger.info("Final portfolio state retrieved.")
             print_portfolio_status(final_portfolio_state)
             
             # Store results
             results = {
                 "status": "completed",
                 "timestamp": datetime.now().isoformat(),
-                "portfolio_before": portfolio_state, # State before execution
-                "ai_analysis": ai_result,
-                "execution_results": execution_results,
-                "portfolio_after": final_portfolio_state # State after execution
+                "portfolio_before": initial_portfolio_state, # Use initial state
+                "ai_analysis": ai_result, # Includes stock decisions & maybe options decisions
+                "stock_execution_results": stock_execution_results,
+                "option_execution_results": option_execution_results,
+                "portfolio_after": final_portfolio_state
             }
             
-            # Save results to file (optional)
             self._save_results(results)
-            
             return results
             
         except Exception as e:

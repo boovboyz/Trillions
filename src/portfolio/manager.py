@@ -21,16 +21,19 @@ from src.utils.llm import call_llm
 import logging
 from datetime import datetime
 import re
+from src.agents.portfolio_sizer import PortfolioSizerAgent  # Import the new agent
+from src.integrations.polygon import PolygonClient # Assuming this exists
+
+logger = logging.getLogger(__name__) # Add logger instance
 
 # --- Define Pydantic Models ---
 class PortfolioDecision(BaseModel):
     action: Literal["buy", "sell", "short", "cover", "hold"]
-    quantity: int = Field(description="Number of shares to trade")
     confidence: float = Field(description="Confidence in the decision, between 0.0 and 100.0")
     reasoning: str = Field(description="Reasoning for the decision")
 
 class PortfolioManagerOutput(BaseModel):
-    decisions: dict[str, PortfolioDecision] = Field(description="Dictionary of ticker to trading decisions")
+    decisions: dict[str, PortfolioDecision] = Field(description="Dictionary of ticker to trading decisions (action, confidence, reasoning - NO quantity)")
 # --- End Pydantic Models ---
 
 
@@ -45,6 +48,9 @@ class PortfolioManager:
             config: Optional configuration dictionary with risk parameters.
         """
         self.alpaca = get_alpaca_client(paper=True)
+        # Assuming Polygon client is needed by sizer and can be instantiated here
+        # This might need API keys from config or environment
+        self.polygon = PolygonClient() 
         
         # Default configuration
         self.config = {
@@ -88,6 +94,16 @@ class PortfolioManager:
             'last_update': None
         }
         
+        # Instantiate the Portfolio Sizer Agent
+        # It needs config, alpaca client, polygon client, and portfolio cache
+        self.portfolio_sizer_agent = PortfolioSizerAgent(
+            config=self.config,
+            alpaca_client=self.alpaca,
+            polygon_client=self.polygon,
+            portfolio_cache=self.portfolio_cache # Pass the cache reference
+        )
+        logger.info("PortfolioManager initialized with PortfolioSizerAgent.")
+
     def update_portfolio_cache(self, force: bool = False) -> None:
         """
         Update the portfolio cache if the last update was older than the update interval.
@@ -705,7 +721,7 @@ class PortfolioManager:
                   ```
 
                   Output strictly in JSON with the following structure:
-                  {{\n                    "decisions": {{\n                      "TICKER1": {{\n                        "action": "buy/sell/short/cover/hold",\n                        "quantity": integer, # MUST respect risk_context limits & existing positions\n                        "confidence": float between 0 and 100,\n                        "reasoning": "string (MUST mention risk context constraints if they influenced the decision)"\n                      }},\n                      "TICKER2": {{\n                        ...\n                      }},\n                      ...\n                    }}\n                  }}\n                  """
+                  {{\n                    "decisions": {{\n                      "TICKER1": {{\n                        "action": "buy/sell/short/cover/hold",\n                        "confidence": float between 0 and 100,\n                        "reasoning": "string (MUST mention risk context constraints if they influenced the decision)"\n                      }},\n                      "TICKER2": {{\n                        ...\n                      }},\n                      ...\n                    }}\n                  }}\n                  """
                 ),
             ]
         )
@@ -749,7 +765,7 @@ class PortfolioManager:
 
         # Create default factory for PortfolioManagerOutput
         def create_default_portfolio_output():
-            return PortfolioManagerOutput(decisions={ticker: PortfolioDecision(action="hold", quantity=0, confidence=0.0, reasoning="Error in portfolio management AI or risk constraints prevent action, defaulting to hold") for ticker in tickers}) # Updated default reason
+            return PortfolioManagerOutput(decisions={ticker: PortfolioDecision(action="hold", confidence=0.0, reasoning="Error in portfolio management AI or risk constraints prevent action, defaulting to hold") for ticker in tickers}) # Updated default reason
 
         # Call the LLM
         # Note: Assumes 'call_llm' utility exists and handles Pydantic parsing/retries
@@ -758,25 +774,25 @@ class PortfolioManager:
 
     def _apply_risk_management(
         self, 
-        decisions: Dict[str, Dict], 
+        decisions: Dict[str, Dict], # Decisions now only have action, confidence, reasoning
         portfolio_state: Dict[str, Any]
     ) -> Dict[str, Dict]:
         """
-        Apply risk management filters to trading decisions.
+        Apply risk management filters to trading decisions (action only).
+        This runs BEFORE sizing. It can change the action to 'hold'.
         
         Args:
-            decisions: Dict mapping ticker symbols to trading decisions.
+            decisions: Dict mapping ticker symbols to trading decisions (NO quantity).
             portfolio_state: Current portfolio state.
             
         Returns:
-            Dict with filtered trading decisions.
+            Dict with filtered trading decisions (action may be changed to 'hold').
         """
         filtered_decisions = {}
         
         # Get portfolio value and cash
         portfolio_value = portfolio_state['portfolio_value']
         cash = portfolio_state['cash']
-        # Directly use the dictionary provided by get_portfolio_state
         positions = portfolio_state.get('positions', {}) # Use .get for safety
         
         # Check overall portfolio risk
@@ -787,97 +803,81 @@ class PortfolioManager:
         
         # Apply overall portfolio risk rules
         for symbol, decision in decisions.items():
-            action = decision.get('action', 'hold').lower()
-            quantity = int(decision.get('quantity', 0))
-            confidence = float(decision.get('confidence', 0))
+            current_decision = decision.copy() # Work on a copy
+            action = current_decision.get('action', 'hold').lower()
+            # confidence = float(current_decision.get('confidence', 0)) # Confidence not used for filtering action
 
-            # Skip if hold or quantity is zero
-            if action == 'hold' or quantity <= 0:
-                filtered_decisions[symbol] = decision
+            # Skip if already hold
+            if action == 'hold':
+                filtered_decisions[symbol] = current_decision
                 continue
                 
             # Check if we've reached maximum drawdown threshold
             if max_drawdown_reached and action in ['buy', 'short']:
-                decision['original_action'] = action
-                decision['action'] = 'hold'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Max drawdown threshold reached'
-                filtered_decisions[symbol] = decision
+                self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to max drawdown.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'hold'
+                current_decision['skip_reason'] = 'Max drawdown threshold reached'
+                filtered_decisions[symbol] = current_decision
                 continue
                 
             # Check if we've reached maximum trades per day
             if max_trades_reached and action in ['buy', 'short']:
-                decision['original_action'] = action
-                decision['action'] = 'hold'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Maximum trades per day reached'
-                filtered_decisions[symbol] = decision
+                self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to max trades per day.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'hold'
+                current_decision['skip_reason'] = 'Maximum trades per day reached'
+                filtered_decisions[symbol] = current_decision
                 continue
                 
             # Check if we have day trades available (for same-day round trips)
             position_exists = symbol in positions
-            
-            # Get today's date for day trade check
-            today = datetime.now().date()
-            
-            # Determine if this would be a day trade
             is_day_trade = False
             if position_exists:
-                # Check if we have any orders for this symbol that were filled today
-                # If we have a filled order today AND we're now trying to close it, it's a day trade
                 today_orders = self._get_today_trades()
                 symbol_today_orders = [
                     order for order in today_orders 
                     if order.get('symbol') == symbol and order.get('status') == 'filled'
                 ]
-                
-                # If there are orders for this symbol today and we're closing the position, it's a day trade
                 if symbol_today_orders and (
                     (action == 'sell' and positions[symbol]['side'] == 'long') or
                     (action == 'cover' and positions[symbol]['side'] == 'short')
                 ):
                     is_day_trade = True
             
-            # For COVER actions, we'll allow them to proceed even if they're day trades
-            # This prioritizes covering short positions over day trade protection
             if is_day_trade and not day_trades_available and action != 'cover':
-                decision['original_action'] = action
-                decision['action'] = 'hold'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'No day trades available'
-                filtered_decisions[symbol] = decision
+                self.logger.warning(f"Risk Filter: Setting {symbol} {action} to 'hold' due to no day trades available.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'hold'
+                current_decision['skip_reason'] = 'No day trades available'
+                filtered_decisions[symbol] = current_decision
                 continue
             
-            # If it's a COVER action that would be a day trade but no day trades available,
-            # we'll still allow it to proceed but log it as a warning
             if is_day_trade and not day_trades_available and action == 'cover':
-                logger.warning(f"Allowing {symbol} {action} despite it being a day trade with no day trades available")
-                # Continue with the decision as-is
+                self.logger.warning(f"Risk Filter: Allowing {symbol} {action} despite it being a day trade with no day trades available (prioritizing cover)")
             
             # Check if we have enough cash (minus reserve) - ONLY for BUY actions
             if action == 'buy':
-                # Calculate cash available (minus reserve)
                 available_cash = cash - (portfolio_value * cash_reserve_pct)
-
                 if available_cash <= 0:
-                    decision['original_action'] = action
-                    decision['action'] = 'hold'
-                    decision['quantity'] = 0
-                    decision['skip_reason'] = 'Insufficient cash (below reserve)'
-                    filtered_decisions[symbol] = decision
+                    self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to insufficient cash (below reserve). Available: {available_cash:.2f}")
+                    current_decision['original_action'] = action
+                    current_decision['action'] = 'hold'
+                    current_decision['skip_reason'] = 'Insufficient cash (below reserve)'
+                    filtered_decisions[symbol] = current_decision
                     continue
             
             # Check short selling configuration
-            if action == 'short' and not self.config['enable_shorts']:
-                decision['original_action'] = action
-                decision['action'] = 'hold'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Short selling disabled'
-                filtered_decisions[symbol] = decision
-                continue
+            if action == 'short' and not self.config.get('enable_shorts', False):
+                 self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' because short selling is disabled.")
+                 current_decision['original_action'] = action
+                 current_decision['action'] = 'hold'
+                 current_decision['skip_reason'] = 'Short selling disabled'
+                 filtered_decisions[symbol] = current_decision
+                 continue
             
-            # If we passed all filters, keep the decision
-            filtered_decisions[symbol] = decision
+            # If we passed all filters, keep the decision (potentially modified action)
+            filtered_decisions[symbol] = current_decision
             
         return filtered_decisions
     
@@ -919,235 +919,6 @@ class PortfolioManager:
         
         return today_orders
     
-    def _calculate_position_sizes(
-        self, 
-        decisions: Dict[str, Dict], 
-        portfolio_state: Dict[str, Any]
-    ) -> Dict[str, Dict]:
-        """
-        Calculate position sizes based on risk management rules.
-        
-        Args:
-            decisions: Dict mapping ticker symbols to trading decisions.
-            portfolio_state: Current portfolio state.
-            
-        Returns:
-            Dict with decisions that include properly sized positions.
-        """
-        sized_decisions = {}
-        
-        # Get portfolio value and cash
-        portfolio_value = portfolio_state['portfolio_value']
-        cash = portfolio_state['cash']
-        # Directly use the dictionary provided by get_portfolio_state
-        positions = portfolio_state.get('positions', {}) # Use .get for safety
-        
-        # --- Get Pending Order Quantities ---
-        all_orders = self.portfolio_cache.get('orders', [])
-        pending_statuses = {'new', 'pending_new', 'accepted', 'partially_filled', 'held', 'calculated', 'pending_cancel', 'pending_replace'}
-        pending_orders = [o for o in all_orders if o.get("status") in pending_statuses]
-
-        pending_quantities = {}
-        for order in pending_orders:
-            symbol = order.get('symbol')
-            if not symbol: continue
-            side = order.get('side')
-            qty = abs(float(order.get('qty', 0))) # Use absolute quantity
-            filled_qty = abs(float(order.get('filled_qty', 0)))
-            pending_qty = qty - filled_qty
-
-            if symbol not in pending_quantities:
-                pending_quantities[symbol] = {'buy': 0, 'sell': 0}
-
-            if side in ['buy', 'cover']: # Treat cover as buy for pending qty
-                pending_quantities[symbol]['buy'] += pending_qty
-            elif side in ['sell', 'short']: # Treat short as sell
-                pending_quantities[symbol]['sell'] += pending_qty
-        # ----------------------------------
-
-        for symbol, decision in decisions.items():
-            action = decision.get('action', 'hold').lower()
-            requested_quantity = int(decision.get('quantity', 0))
-            confidence = float(decision.get('confidence', 0))
-
-            # Get pending quantities for the current symbol
-            symbol_pending_buy = pending_quantities.get(symbol, {}).get('buy', 0)
-            symbol_pending_sell = pending_quantities.get(symbol, {}).get('sell', 0)
-
-            # Skip if hold
-            if action == 'hold' or requested_quantity <= 0:
-                sized_decisions[symbol] = decision
-                continue
-                
-            # Get current price
-            current_price = 0
-            try:
-                latest_trade = self.alpaca.get_latest_trade(symbol)
-                current_price = latest_trade['price']
-            except Exception as e:
-                print(f"Error getting latest price for {symbol}: {e}")
-                # Skip if we can't get price
-                decision['original_action'] = action
-                decision['action'] = 'hold'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Could not get current price'
-                sized_decisions[symbol] = decision
-                continue
-                
-            # Calculate position limits
-            max_position_value = portfolio_value * self.config['max_position_size_pct']
-            max_order_value = portfolio_value * self.config['max_single_order_size_pct']
-            
-            # Adjust for volatility if configured
-            volatility_factor = 1.0
-            if self.config['volatility_adjustment']:
-                # Get volatility for the symbol
-                volatility = self._calculate_volatility(symbol)
-
-                # Reduce position size for higher volatility
-                if volatility > 20:
-                    volatility_factor = 1.0 - (0.05 * (volatility - 20) / 1.0)
-                    volatility_factor = max(0.2, volatility_factor)  # Don't reduce by more than 80%
-                    max_position_value *= volatility_factor
-                    max_order_value *= volatility_factor
-            
-            # Calculate maximum shares based on price and limits
-            max_position_shares = int(max_position_value / current_price) if current_price > 0 else 0
-            max_order_shares = int(max_order_value / current_price) if current_price > 0 else 0
-
-            # Adjust based on action type
-            if action == 'buy':
-                # Get existing position if any
-                existing_position = positions.get(symbol, None)
-                existing_shares = int(existing_position['qty']) if existing_position and existing_position['side'] == 'long' else 0
-
-                # Adjust for pending BUY orders affecting max position size
-                effective_max_position_shares = max_position_shares - symbol_pending_buy
-
-                # Calculate how many more shares we can buy
-                shares_to_target = effective_max_position_shares - existing_shares
-
-                # Limit by max order size and cash available
-                max_shares_by_cash = int(cash / current_price) if current_price > 0 else 0
-                allowed_new_shares = min(shares_to_target, max_order_shares, max_shares_by_cash)
-
-                # Don't allow negative values (can happen if we're already over max position size)
-                allowed_new_shares = max(0, allowed_new_shares)
-
-                # Limit by requested quantity
-                final_quantity_before_confidence = min(requested_quantity, allowed_new_shares)
-
-                final_quantity = final_quantity_before_confidence # Use the quantity directly
-
-                # Update decision
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = final_quantity
-                decision['sizing_info'] = {
-                    'max_position_shares': max_position_shares,
-                    'effective_max_position_shares (incl pending)': effective_max_position_shares,
-                    'max_order_shares': max_order_shares,
-                    'existing_shares': existing_shares,
-                    'allowed_new_shares': allowed_new_shares
-                }
-                
-            elif action == 'sell':
-                # Get existing position
-                existing_position = positions.get(symbol, None)
-                existing_shares = int(existing_position['qty']) if existing_position and existing_position['side'] == 'long' else 0
-
-                # Adjust available shares by subtracting pending SELL orders
-                effective_existing_shares = existing_shares - symbol_pending_sell
-                effective_existing_shares = max(0, effective_existing_shares) # Ensure non-negative
-
-                # Can't sell more than we effectively own
-                final_quantity_before_confidence = min(requested_quantity, effective_existing_shares)
-
-                final_quantity = final_quantity_before_confidence # Use the quantity directly
-
-                # Update decision
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = final_quantity
-                decision['sizing_info'] = {
-                    'existing_shares': existing_shares,
-                    'pending_sell_qty': symbol_pending_sell,
-                    'effective_existing_shares': effective_existing_shares
-                }
-                
-            elif action == 'short':
-                # Get existing position if any
-                existing_position = positions.get(symbol, None)
-                existing_shares = int(existing_position['qty']) if existing_position and existing_position['side'] == 'short' else 0
-
-                # Use specific short position limit which is typically lower than long
-                max_short_position_value = portfolio_value * self.config.get('max_short_position_size_pct',
-                                                                           self.config['max_position_size_pct'])
-                max_short_position_shares = int(max_short_position_value / current_price) if current_price > 0 else 0
-
-                # Adjust for pending SELL/SHORT orders affecting max position size
-                effective_max_short_shares = max_short_position_shares - symbol_pending_sell
-
-                # Calculate how many more shares we can short
-                shares_to_target = effective_max_short_shares - abs(existing_shares)
-
-                # Limit by max order size and buying power for shorts
-                max_shares_by_buying_power = int((portfolio_state['buying_power'] / 2) / current_price) if current_price > 0 else 0
-                allowed_new_shares = min(shares_to_target, max_order_shares, max_shares_by_buying_power)
-
-                # Don't allow negative values
-                allowed_new_shares = max(0, allowed_new_shares)
-
-                # Limit by requested quantity
-                final_quantity_before_confidence = min(requested_quantity, allowed_new_shares)
-
-                final_quantity = final_quantity_before_confidence # Use the quantity directly
-
-                # Update decision
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = final_quantity
-                decision['sizing_info'] = {
-                    'max_short_position_shares': max_short_position_shares,
-                    'effective_max_short_shares (incl pending)': effective_max_short_shares,
-                    'max_order_shares': max_order_shares,
-                    'existing_shares': existing_shares,
-                    'allowed_new_shares': allowed_new_shares,
-                    'max_shares_by_buying_power': max_shares_by_buying_power
-                }
-                
-            elif action == 'cover':
-                # Get existing position
-                existing_position = positions.get(symbol, None)
-
-                # Calculate existing_shares (absolute value)
-                existing_shares = 0
-                if existing_position and existing_position.get('side') == 'short':
-                    try:
-                        qty_val = existing_position.get('qty', '0')
-                        existing_shares = abs(int(float(qty_val)))
-                    except ValueError as e:
-                         existing_shares = 0 # Default to 0 on error
-
-                # Adjust available shares by subtracting pending BUY/COVER orders
-                effective_existing_shares = existing_shares - symbol_pending_buy
-                effective_existing_shares = max(0, effective_existing_shares) # Ensure non-negative
-
-                # Can't cover more than we effectively owe
-                final_quantity_before_confidence = min(requested_quantity, effective_existing_shares)
-
-                final_quantity = final_quantity_before_confidence # Use the quantity directly
-
-                # Update decision (No confidence scaling applied for cover actions)
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = final_quantity
-                decision['sizing_info'] = {
-                    'existing_shares': existing_shares,
-                    'pending_buy_qty': symbol_pending_buy,
-                    'effective_existing_shares': effective_existing_shares
-                }
-            
-            sized_decisions[symbol] = decision
-            
-        return sized_decisions
-    
     def manage_positions(self) -> Dict[str, Dict]:
         """
         Manage existing positions (adjust stops, scale in/out, etc.).
@@ -1162,11 +933,12 @@ class PortfolioManager:
         management_actions = {}
         
         # Only proceed if we have positions
-        if not portfolio_state['positions']:
+        # portfolio_state['positions'] is now a dict {symbol: position_dict}
+        if not portfolio_state.get('positions'):
             return management_actions
             
-        # Check scaling conditions for each position
-        for position in portfolio_state['positions']:
+        # Check scaling conditions for each position dictionary (iterate over values)
+        for position in portfolio_state['positions'].values(): 
             symbol = position['symbol']
             side = position['side']
             scale_in = position.get('scale_in', False)
@@ -1278,11 +1050,12 @@ class PortfolioManager:
         management_actions = {}
         
         # Only proceed if we have positions
-        if not portfolio_state['positions']:
+        # portfolio_state['positions'] is now a dict {symbol: position_dict}
+        if not portfolio_state.get('positions'):
             return management_actions
             
-        # Check stop and target conditions for each position
-        for position in portfolio_state['positions']:
+        # Check stop and target conditions for each position dictionary (iterate over values)
+        for position in portfolio_state['positions'].values(): 
             symbol = position['symbol']
             side = position['side']
             current_price = float(position['current_price'])
@@ -1537,20 +1310,21 @@ class PortfolioManager:
 
     def _apply_options_risk_management(
         self,
-        decisions: Dict[str, Dict],
+        decisions: Dict[str, Dict], # Decisions only have action, confidence, reasoning etc.
         portfolio_state: Dict[str, Any],
         options_portfolio_state: Dict[str, Any]
     ) -> Dict[str, Dict]:
         """
-        Apply risk management filters to options trading decisions.
+        Apply risk management filters to options trading decisions (action only).
+        This runs BEFORE sizing. It can change the action to 'none'.
 
         Args:
-            decisions: Dict mapping ticker symbols to options decisions.
+            decisions: Dict mapping ticker symbols to options decisions (NO quantity).
             portfolio_state: Current portfolio state.
             options_portfolio_state: Current options portfolio state.
 
         Returns:
-            Dict with filtered options trading decisions.
+            Dict with filtered options trading decisions (action may be changed to 'none').
         """
         filtered_decisions = {}
 
@@ -1560,7 +1334,7 @@ class PortfolioManager:
 
         # Get options-specific metrics
         options_market_value = options_portfolio_state['options_market_value']
-        options_exposure_ratio = options_portfolio_state['options_exposure_ratio']
+        # options_exposure_ratio = options_portfolio_state['options_exposure_ratio'] # Not directly used here
 
         # Check overall portfolio risk
         max_drawdown_reached = self._check_drawdown_threshold(portfolio_state)
@@ -1568,236 +1342,92 @@ class PortfolioManager:
         max_trades_reached = len(self._get_today_trades()) >= self.config['max_trades_per_day']
         cash_reserve_pct = self.config['cash_reserve_pct']
 
-        # Options-specific risk limits
-        max_options_allocation = portfolio_value * self.config.get('max_options_allocation_pct', 0.15) # Use config, default 15%
-        max_single_option_allocation = portfolio_value * self.config.get('max_options_position_size_pct', 0.05) # Use config, default 5%
+        # Options-specific risk limits from config
+        max_options_allocation_pct = self.config.get('max_options_allocation_pct', 0.15)
+        max_single_option_allocation_pct = self.config.get('max_options_position_size_pct', 0.05)
+
+        max_options_allocation_value = portfolio_value * max_options_allocation_pct
+        max_single_option_allocation_value = portfolio_value * max_single_option_allocation_pct
 
         for ticker, decision in decisions.items():
-            action = decision.get('action', 'none').lower()
+            current_decision = decision.copy()
+            action = current_decision.get('action', 'none').lower()
 
-            # Skip if no action
+            # Skip if already no action
             if action == 'none':
-                filtered_decisions[ticker] = decision
+                filtered_decisions[ticker] = current_decision
                 continue
 
-            # Get the option details
-            option_ticker = decision.get('ticker', '')
-            quantity = int(decision.get('quantity', 0))
-            estimated_price = decision.get('limit_price', 0) or 0
+            # Get the option details needed for checks
+            option_ticker = current_decision.get('ticker', '')
+            # estimated_price = current_decision.get('limit_price', 0) or 0 # Price/value checks moved to sizing agent
 
-            # Skip if no valid option ticker or quantity
-            if not option_ticker or quantity <= 0:
-                decision['original_action'] = action
-                decision['action'] = 'none'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Invalid option ticker or quantity'
-                filtered_decisions[ticker] = decision
+            # Skip if no valid option ticker (fundamental check)
+            if not option_ticker:
+                self.logger.warning(f"Risk Filter: Setting {ticker} action to 'none' due to missing option ticker.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'none'
+                current_decision['skip_reason'] = 'Invalid option ticker'
+                filtered_decisions[ticker] = current_decision
                 continue
 
             # Check max drawdown threshold
-            if max_drawdown_reached and action in ['buy']:
-                decision['original_action'] = action
-                decision['action'] = 'none'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Max drawdown threshold reached'
-                filtered_decisions[ticker] = decision
+            if max_drawdown_reached and action in ['buy']: # Only restrict opening new risk
+                self.logger.warning(f"Risk Filter: Setting {option_ticker} action to 'none' due to max drawdown.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'none'
+                current_decision['skip_reason'] = 'Max drawdown threshold reached'
+                filtered_decisions[ticker] = current_decision
                 continue
 
             # Check max trades per day
-            if max_trades_reached and action in ['buy', 'sell']:
-                decision['original_action'] = action
-                decision['action'] = 'none'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Maximum trades per day reached'
-                filtered_decisions[ticker] = decision
+            if max_trades_reached and action in ['buy', 'sell']: # Restrict opening new trades
+                self.logger.warning(f"Risk Filter: Setting {option_ticker} action to 'none' due to max trades per day.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'none'
+                current_decision['skip_reason'] = 'Maximum trades per day reached'
+                filtered_decisions[ticker] = current_decision
                 continue
 
             # Check day trading restrictions
             position_exists = option_ticker in options_portfolio_state.get('positions', {})
-
-            # Determine if this would be a day trade
             is_day_trade = False
-            if position_exists:
+            if position_exists and action == 'close': # Only closing can be a day trade for options here
                 today_orders = self._get_today_trades()
                 option_today_orders = [
                     order for order in today_orders
                     if order.get('symbol') == option_ticker and order.get('status') == 'filled'
                 ]
-
-                if option_today_orders and action == 'close':
+                if option_today_orders:
                     is_day_trade = True
 
             if is_day_trade and not day_trades_available:
-                decision['original_action'] = action
-                decision['action'] = 'none'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'No day trades available'
-                filtered_decisions[ticker] = decision
+                # Note: Unlike stocks, we block closing options if it's a day trade and none available.
+                # Covering shorts was prioritized for stocks, less critical for options? Review this policy.
+                self.logger.warning(f"Risk Filter: Setting {option_ticker} {action} to 'none' due to no day trades available.")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'none' # Change action to none
+                current_decision['skip_reason'] = 'No day trades available'
+                filtered_decisions[ticker] = current_decision
                 continue
 
-            # Check options allocation limits
-            if options_market_value >= max_options_allocation and action == 'buy':
-                decision['original_action'] = action
-                decision['action'] = 'none'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Maximum options allocation reached'
-                filtered_decisions[ticker] = decision
+            # Check options allocation limits (only for BUY actions)
+            if action == 'buy' and options_market_value >= max_options_allocation_value:
+                self.logger.warning(f"Risk Filter: Setting {option_ticker} action to 'none' due to max options allocation reached ({options_market_value:.2f} >= {max_options_allocation_value:.2f}).")
+                current_decision['original_action'] = action
+                current_decision['action'] = 'none'
+                current_decision['skip_reason'] = 'Maximum options allocation reached'
+                filtered_decisions[ticker] = current_decision
                 continue
 
-            # Check single option allocation limit
-            estimated_position_value = quantity * estimated_price * 100  # Each contract is for 100 shares
-            if estimated_position_value > max_single_option_allocation and action == 'buy':
-                decision['original_action'] = action
-                decision['action'] = 'none'
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Maximum single option allocation exceeded'
-                filtered_decisions[ticker] = decision
-                continue
+            # Check single option allocation limit & cash - MOVED TO SIZING AGENT
+            # These checks require price and quantity, which are determined later.
+            # The sizing agent will ensure the final position doesn't exceed these limits.
 
-            # Check if we have enough cash (minus reserve) - ONLY for BUY actions
-            if action == 'buy':
-                # Calculate cash available (minus reserve)
-                available_cash = cash - (portfolio_value * cash_reserve_pct)
-                needed_cash = estimated_position_value
-
-                if needed_cash > available_cash:
-                    decision['original_action'] = action
-                    decision['action'] = 'none'
-                    decision['quantity'] = 0
-                    decision['skip_reason'] = 'Insufficient cash (below reserve)'
-                    filtered_decisions[ticker] = decision
-                    continue
-
-            # If we passed all filters, keep the decision
-            filtered_decisions[ticker] = decision
+            # If we passed all filters, keep the decision (potentially modified action)
+            filtered_decisions[ticker] = current_decision
 
         return filtered_decisions
-
-    def _calculate_options_position_sizes(
-        self,
-        decisions: Dict[str, Dict],
-        portfolio_state: Dict[str, Any],
-        options_portfolio_state: Dict[str, Any]
-    ) -> Dict[str, Dict]:
-        """
-        Calculate options position sizes based on risk management rules.
-
-        Args:
-            decisions: Dict mapping ticker symbols to options decisions.
-            portfolio_state: Current portfolio state.
-            options_portfolio_state: Current options portfolio state.
-
-        Returns:
-            Dict with decisions that include properly sized positions.
-        """
-        sized_decisions = {}
-
-        # Get portfolio value and cash
-        portfolio_value = portfolio_state['portfolio_value']
-        cash = portfolio_state['cash']
-        options_positions = options_portfolio_state.get('positions', {})
-
-        for ticker, decision in decisions.items():
-            action = decision.get('action', 'none').lower()
-            option_ticker = decision.get('ticker', '')
-            requested_quantity = int(decision.get('quantity', 0))
-
-            # Skip if no action or invalid ticker
-            if action == 'none' or not option_ticker:
-                sized_decisions[ticker] = decision
-                continue
-
-            # Get current price of the option
-            current_price = 0
-            limit_price = decision.get('limit_price', 0)
-
-            # Try to get the current price
-            if option_ticker in options_positions:
-                current_price = float(options_positions[option_ticker]['current_price'])
-            elif limit_price:
-                current_price = limit_price
-            else:
-                try:
-                    # Import here to avoid circular imports
-                    from src.integrations.polygon import PolygonClient
-                    polygon_client = PolygonClient()
-                    contract_details = polygon_client.get_option_contract_details(option_ticker)
-                    current_price = contract_details.last_price or contract_details.ask
-                except Exception as e:
-                    logging.error(f"Could not get current price for {option_ticker}: {e}")
-
-            if current_price <= 0:
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = 0
-                decision['skip_reason'] = 'Could not determine current price'
-                sized_decisions[ticker] = decision
-                continue
-
-            # Calculate max position size
-            max_position_value = portfolio_value * self.config.get('max_options_position_size_pct', 0.05)  # Default 5% max
-            max_position_contracts = int(max_position_value / (current_price * 100)) if current_price > 0 else 0
-
-            # Calculate max order size
-            max_order_value = portfolio_value * self.config.get('max_single_order_size_pct', 0.10) # Use standard order limit
-            max_order_contracts = int(max_order_value / (current_price * 100)) if current_price > 0 else 0
-
-            # Adjust based on action type
-            if action == 'buy':
-                # Get existing position if any
-                existing_position = options_positions.get(option_ticker, None)
-                existing_contracts = int(existing_position['qty']) if existing_position and existing_position['side'] == 'long' else 0
-
-                # Calculate how many more contracts we can buy
-                contracts_to_target = max_position_contracts - existing_contracts
-
-                # Limit by max order size and cash available
-                max_contracts_by_cash = int(cash / (current_price * 100)) if current_price > 0 else 0
-                allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash)
-
-                # Don't allow negative values
-                allowed_new_contracts = max(0, allowed_new_contracts)
-
-                # Limit by requested quantity
-                final_quantity = min(requested_quantity, allowed_new_contracts)
-
-                # Update decision
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = final_quantity
-                decision['sizing_info'] = {
-                    'max_position_contracts': max_position_contracts,
-                    'max_order_contracts': max_order_contracts,
-                    'existing_contracts': existing_contracts,
-                    'allowed_new_contracts': allowed_new_contracts
-                }
-
-            elif action == 'sell' or action == 'close':
-                # Get existing position if any
-                existing_position = options_positions.get(option_ticker, None)
-                existing_contracts = abs(int(existing_position['qty'])) if existing_position else 0
-
-                # If closing, use all existing contracts
-                if action == 'close':
-                    final_quantity = existing_contracts
-                else: # Selling (to open)
-                    # Similar logic to buy for max position/order size
-                    max_position_value = portfolio_value * self.config.get('max_short_position_size_pct', 0.20) * self.config.get('max_options_allocation_pct', 0.15) # Size short options relative to overall max
-                    max_position_contracts = int(max_position_value / (current_price * 100)) if current_price > 0 else 0
-
-                    contracts_to_target = max_position_contracts - existing_contracts # existing here would be negative for shorts
-                    allowed_new_contracts = min(contracts_to_target, max_order_contracts)
-                    allowed_new_contracts = max(0, allowed_new_contracts)
-                    final_quantity = min(requested_quantity, allowed_new_contracts)
-
-                # Update decision
-                decision['original_quantity'] = requested_quantity
-                decision['quantity'] = final_quantity
-                decision['sizing_info'] = {
-                    'existing_contracts': existing_contracts
-                }
-
-            sized_decisions[ticker] = decision
-
-        return sized_decisions
 
     def manage_options_positions(self) -> Dict[str, Dict]:
         """
@@ -2013,3 +1643,167 @@ class PortfolioManager:
         }
         
         return ai_portfolio
+
+    # --- Execute Combined Decision (New Method) ---
+    def execute_combined_decision(
+        self,
+        stock_decision: Optional[Dict[str, Any]], # Action, confidence, reasoning (NO quantity)
+        option_decision: Optional[Dict[str, Any]] # Action, confidence, reasoning etc. (NO quantity)
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Executes a potentially combined stock and option decision after risk filtering and sizing.
+
+        Args:
+            stock_decision: The stock decision dictionary (or None).
+            option_decision: The option decision dictionary (or None).
+
+        Returns:
+            A tuple containing the execution results for the stock and option orders (or None).
+            Result format: { 'status': '...', 'message': '...', 'order': {...} or None }
+        """
+        stock_execution_result = None
+        option_execution_result = None
+
+        # --- Basic Validation & State Update ---
+        if not stock_decision and not option_decision:
+            logger.info("execute_combined_decision: No decisions provided.")
+            return None, None
+
+        self.update_portfolio_cache(force=True)
+        portfolio_state = self.get_portfolio_state()
+        options_portfolio_state = self.get_options_portfolio_state()
+
+        # --- Market Hours Check ---
+        if self.config['market_hours_only']:
+            clock = self.alpaca.get_clock()
+            if not clock['is_open']:
+                logger.warning("Market is closed. Skipping combined execution.")
+                skip_result = {'status': 'skipped', 'message': 'Market is closed', 'order': None}
+                if stock_decision: stock_execution_result = skip_result
+                if option_decision: option_execution_result = skip_result
+                return stock_execution_result, option_execution_result
+
+        # --- Apply Risk Filters (Action Filtering) ---
+        filtered_stock_decision = None
+        if stock_decision:
+            # Wrap in dict for filter method compatibility
+            temp_stock_decisions = {stock_decision['ticker']: stock_decision}
+            filtered_result = self._apply_risk_management(temp_stock_decisions, portfolio_state)
+            filtered_stock_decision = filtered_result.get(stock_decision['ticker'])
+
+        filtered_option_decision = None
+        if option_decision:
+            # Wrap in dict for filter method compatibility
+            # Ensure the option decision dict has the 'ticker' key before using it
+            option_ticker_key = option_decision.get('ticker')
+            if option_ticker_key:
+                temp_option_decisions = {option_ticker_key: option_decision}
+                filtered_result = self._apply_options_risk_management(temp_option_decisions, portfolio_state, options_portfolio_state)
+                filtered_option_decision = filtered_result.get(option_ticker_key)
+            else:
+                logger.warning(f"Option decision received without a 'ticker' key: {option_decision}. Skipping options risk management for it.")
+                # Keep filtered_option_decision as None or handle appropriately
+                filtered_option_decision = option_decision # Pass it along if it has other relevant info like action='none'
+
+        # Check if actions were changed to hold/none
+        final_stock_action = filtered_stock_decision.get('action', 'hold') if filtered_stock_decision else 'hold'
+        final_option_action = filtered_option_decision.get('action', 'none') if filtered_option_decision else 'none'
+
+        if final_stock_action == 'hold' and final_option_action == 'none':
+             logger.info("Both stock and option actions are hold/none after risk filtering. Nothing to size or execute.")
+             if filtered_stock_decision:
+                 stock_execution_result = {'status': 'skipped', 'message': f"Action '{filtered_stock_decision.get('original_action', 'hold')}' filtered to hold. Reason: {filtered_stock_decision.get('skip_reason', 'N/A')}", 'order': None}
+             if filtered_option_decision:
+                 option_execution_result = {'status': 'skipped', 'message': f"Action '{filtered_option_decision.get('original_action', 'none')}' filtered to none. Reason: {filtered_option_decision.get('skip_reason', 'N/A')}", 'order': None}
+             return stock_execution_result, option_execution_result
+
+        # --- Call Portfolio Sizer Agent ---
+        logger.info("Calling PortfolioSizerAgent...")
+        try:
+            # Pass the decisions that passed risk filtering (or None if they didn't exist initially)
+            sized_stock_decision, sized_option_decision = self.portfolio_sizer_agent.calculate_combined_sizes(
+                filtered_stock_decision if final_stock_action != 'hold' else None,
+                filtered_option_decision if final_option_action != 'none' else None,
+                portfolio_state,
+                options_portfolio_state
+            )
+        except Exception as e:
+            logger.error(f"Error during portfolio sizing: {e}", exc_info=True)
+            error_result = {'status': 'error', 'message': f'Sizing agent failed: {e}', 'order': None}
+            if stock_decision: stock_execution_result = error_result
+            if option_decision: option_execution_result = error_result
+            return stock_execution_result, option_execution_result
+
+        # --- Execute Orders ---
+        # Execute Stock Order if sized quantity > 0
+        if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0:
+            logger.info(f"Executing sized stock decision: {sized_stock_decision}")
+            # Alpaca execution expects a dict keyed by symbol
+            stock_orders_to_execute = {sized_stock_decision['ticker']: sized_stock_decision}
+            try:
+                 results = self.alpaca.execute_trading_decisions(stock_orders_to_execute)
+                 stock_execution_result = results.get(sized_stock_decision['ticker'])
+                 logger.info(f"Stock Execution Result: {stock_execution_result}")
+            except Exception as e:
+                 logger.error(f"Error executing stock trade for {sized_stock_decision['ticker']}: {e}", exc_info=True)
+                 stock_execution_result = {'status': 'error', 'message': f'Stock execution failed: {e}', 'order': None}
+        elif stock_decision: # If there was an initial decision but quantity is 0
+            reason = sized_stock_decision.get('skip_reason', 'Quantity sized to zero') if sized_stock_decision else 'Filtered to hold'
+            stock_execution_result = {'status': 'skipped', 'message': reason, 'order': None}
+            logger.info(f"Skipping stock execution for {stock_decision['ticker']}. Reason: {reason}")
+
+        # Execute Option Order if sized quantity > 0
+        if sized_option_decision and sized_option_decision.get('quantity', 0) > 0:
+            logger.info(f"Executing sized option decision: {sized_option_decision}")
+            from src.integrations import AlpacaOptionsTrader # Import locally if not already available
+            options_trader = AlpacaOptionsTrader(paper=True) # Assuming paper trading
+            # Option execution expects a dict keyed by underlying or unique ID?
+            # Assuming it takes the decision dict directly for now.
+            # NEED TO CONFIRM execute_option_decision signature and input format.
+            option_orders_to_execute = {sized_option_decision['ticker']: sized_option_decision} # Adjust key if needed
+            try:
+                 # Assuming execute_options_decisions takes dict like stocks
+                 results = options_trader.execute_options_decisions(option_orders_to_execute)
+                 option_execution_result = results.get(sized_option_decision['ticker'])
+                 logger.info(f"Option Execution Result: {option_execution_result}")
+            except Exception as e:
+                 logger.error(f"Error executing option trade for {sized_option_decision['ticker']}: {e}", exc_info=True)
+                 option_execution_result = {'status': 'error', 'message': f'Option execution failed: {e}', 'order': None}
+        elif option_decision: # If there was an initial decision but quantity is 0
+            reason = sized_option_decision.get('skip_reason', 'Quantity sized to zero') if sized_option_decision else 'Filtered to none'
+            option_execution_result = {'status': 'skipped', 'message': reason, 'order': None}
+            logger.info(f"Skipping option execution for {option_decision['ticker']}. Reason: {reason}")
+
+        return stock_execution_result, option_execution_result
+
+    # --- Old Execution Methods (Refactor/Remove) ---
+    def execute_decision(self, decisions: Dict[str, Dict]) -> Dict[str, Dict]:
+        """
+        DEPRECATED: Use execute_combined_decision. Executes stock trading decisions individually.
+        """
+        logger.warning("execute_decision is deprecated. Use execute_combined_decision for holistic sizing.")
+        results = {}
+        for ticker, decision in decisions.items():
+             # Add the ticker back into the decision dict before passing it
+             decision_with_ticker = decision.copy()
+             decision_with_ticker['ticker'] = ticker # Add the stock ticker key
+             # Assume no associated option decision when called this way
+             stock_result, _ = self.execute_combined_decision(stock_decision=decision_with_ticker, option_decision=None)
+             results[ticker] = stock_result if stock_result else {'status': 'error', 'message': 'Execution failed', 'order': None}
+        return results
+
+    def execute_options_decision(self, options_decisions: Dict[str, Dict]) -> Dict[str, Dict]:
+        """
+        DEPRECATED: Use execute_combined_decision. Executes option trading decisions individually.
+        """
+        logger.warning("execute_options_decision is deprecated. Use execute_combined_decision for holistic sizing.")
+        results = {}
+        # The key in options_decisions should be the option ticker itself
+        for option_ticker, decision in options_decisions.items(): 
+             # Add the ticker back into the decision dict before passing it
+             decision_with_ticker = decision.copy()
+             decision_with_ticker['ticker'] = option_ticker # Add the option ticker key
+             # Assume no associated stock decision when called this way
+             _, option_result = self.execute_combined_decision(stock_decision=None, option_decision=decision_with_ticker)
+             results[option_ticker] = option_result if option_result else {'status': 'error', 'message': 'Execution failed', 'order': None}
+        return results

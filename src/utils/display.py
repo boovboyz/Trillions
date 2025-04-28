@@ -168,46 +168,27 @@ def print_trading_output(result: dict) -> None:
     print(f"\n{Fore.WHITE}{Style.BRIGHT}AI DECISIONS:{Style.RESET_ALL}") # Renamed from PORTFOLIO SUMMARY
     ai_decision_data = []
     
-    # Extract portfolio manager reasoning and individual ticker reasoning
-    # **Revised Portfolio Strategy Logic**
-    overall_strategy = []
-    individual_ticker_reasons = []
+    # --- Revised Portfolio Strategy Logic (Collect data first) ---
+    overall_strategy_text = ""
+    ticker_breakdown_data = [] # Use a list of lists for tabulate
 
     # Filter decisions to only include requested tickers
     filtered_decisions = {ticker: decision for ticker, decision in decisions.items() 
                           if ticker in requested_tickers or not result.get("analyst_signals", {})}
 
-    # Check for a general reasoning from the portfolio manager (often in the first decision)
-    pm_reasoning = filtered_decisions.get(next(iter(filtered_decisions)), {}).get("reasoning", "") if filtered_decisions else ""
-    # Heuristic: If PM reasoning doesn't mention a specific ticker from the list, treat it as general.
+    # Attempt to find a general reasoning
+    first_decision = next(iter(filtered_decisions.values()), None)
+    pm_reasoning = first_decision.get("reasoning", "") if first_decision else ""
     is_general_reasoning = False
     if pm_reasoning and isinstance(pm_reasoning, str):
+        # Heuristic: If PM reasoning doesn't mention a specific ticker from the filtered list, treat it as general.
         if not any(ticker in pm_reasoning for ticker in filtered_decisions.keys()):
-             is_general_reasoning = True
-             overall_strategy.append(f"{pm_reasoning}")
-             overall_strategy.append("\nTicker Breakdown:") # Add separator
+            is_general_reasoning = True
+            overall_strategy_text = pm_reasoning
 
-    # Always collect individual ticker reasons
-    for ticker, decision in filtered_decisions.items():
-        # If PM reasoning was general, skip adding it again here if it's identical
-        reason = decision.get("reasoning", f"No specific reasoning provided for {ticker}.")
-        if is_general_reasoning and reason == pm_reasoning:
-             reason = f"See overall strategy for {ticker}."
-             
-        action = decision.get("action", "HOLD").upper()
-        confidence = decision.get("confidence", 0)
-        individual_ticker_reasons.append(f"- {Fore.CYAN}{ticker}{Style.RESET_ALL} ({action}, {confidence:.1f}%): {reason}")
-    
-    # Combine general strategy (if any) and individual reasons
-    if not individual_ticker_reasons:
-         strategy_text = pm_reasoning or "No specific reasoning provided by the portfolio manager or individual agents for the overall strategy."
-    else:
-         strategy_text = "\n".join(overall_strategy + individual_ticker_reasons)
-                 
-    # Only include requested tickers in the decisions table
+    # Populate AI Decisions Table data (without Quantity) and Ticker Breakdown data
     for ticker, decision in filtered_decisions.items():
         action = decision.get("action", "-").upper() # Default to '-' if missing
-        quantity = decision.get('quantity', 0) # Default to 0 if missing
         confidence = decision.get('confidence', 0.0) # Default to 0.0 if missing
 
         action_color = {
@@ -219,51 +200,91 @@ def print_trading_output(result: dict) -> None:
             "-": Fore.WHITE, # Color for default action
         }.get(action, Fore.WHITE)
 
-        # Ensure quantity and confidence are formatted correctly even if defaulted
-        quantity_str = f"{quantity}" if quantity is not None else "0"
         confidence_str = f"{confidence:.1f}%" if confidence is not None else "0.0%"
 
+        # Add to AI Decisions table (Ticker, Action, Confidence)
         ai_decision_data.append(
             [
                 f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
                 f"{action_color}{action}{Style.RESET_ALL}",
-                f"{action_color}{quantity_str}{Style.RESET_ALL}",
                 f"{Fore.WHITE}{confidence_str}{Style.RESET_ALL}",
             ]
         )
 
-    headers = [f"{Fore.WHITE}Ticker", "Action", "Quantity", "Confidence"]
-    
-    # Print the AI Decisions table - ensure colalign matches the 4 columns
+        # Populate Ticker Breakdown data
+        reason = decision.get("reasoning", f"No specific reasoning provided for {ticker}.")
+        # If PM reasoning was general and identical, provide a pointer
+        if is_general_reasoning and reason == pm_reasoning:
+            reason = f"See overall strategy for {ticker}."
+        
+        # Wrap reasoning for the table
+        wrapped_reasoning_bd = ""
+        current_line_bd = ""
+        max_line_length_bd = 50 # Adjust width for breakdown table
+        for word in reason.split():
+            if len(current_line_bd) + len(word) + 1 > max_line_length_bd:
+                wrapped_reasoning_bd += current_line_bd + "\n"
+                current_line_bd = word
+            else:
+                if current_line_bd:
+                    current_line_bd += " " + word
+                else:
+                    current_line_bd = word
+        if current_line_bd:
+            wrapped_reasoning_bd += current_line_bd
+            
+        ticker_breakdown_data.append([
+            f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
+            f"{action_color}{action}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{confidence_str}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{wrapped_reasoning_bd}{Style.RESET_ALL}"
+        ])
+
+    # --- Print AI Decisions Table (No Quantity) ---
+    headers_ai = [f"{Fore.WHITE}Ticker", "Action", "Confidence"]
     print(
         tabulate(
             ai_decision_data,
-            headers=headers,
+            headers=headers_ai,
             tablefmt="grid",
         )
     )
     
-    # Print Enhanced Portfolio Strategy Reasoning
-    # Wrap long reasoning text to make it more readable
-    wrapped_reasoning = ""
-    current_line = ""
-    # Use a fixed width for wrapping
-    max_line_length = 80 # Adjusted width slightly
-    for word in strategy_text.split(): # Use combined strategy_text
-        if len(current_line) + len(word) + 1 > max_line_length:
-            wrapped_reasoning += current_line + "\n"
-            current_line = word
-        else:
-            if current_line:
-                current_line += " " + word
-            else:
-                current_line = word
-    if current_line:
-        wrapped_reasoning += current_line
-            
+    # --- Print Enhanced Portfolio Strategy (General + Table) ---
     print(f"\n{Fore.WHITE}{Style.BRIGHT}Portfolio Strategy:{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{wrapped_reasoning}{Style.RESET_ALL}")
-    
+    if overall_strategy_text:
+        # Wrap general strategy text
+        wrapped_overall = ""
+        current_line_os = ""
+        max_line_length_os = 80 
+        for word in overall_strategy_text.split():
+            if len(current_line_os) + len(word) + 1 > max_line_length_os:
+                wrapped_overall += current_line_os + "\n"
+                current_line_os = word
+            else:
+                if current_line_os:
+                    current_line_os += " " + word
+                else:
+                    current_line_os = word
+        if current_line_os:
+            wrapped_overall += current_line_os
+        print(f"{Fore.CYAN}{wrapped_overall}{Style.RESET_ALL}\n") # Add newline for separation
+
+    # Print Ticker Breakdown Table
+    if ticker_breakdown_data:
+        print(f"{Fore.WHITE}{Style.BRIGHT}Ticker Breakdown:{Style.RESET_ALL}")
+        headers_bd = [f"{Fore.WHITE}Ticker", "Action", "Confidence", "Reasoning"]
+        print(
+            tabulate(
+                ticker_breakdown_data,
+                headers=headers_bd,
+                tablefmt="grid",
+            )
+        )
+    elif not overall_strategy_text:
+        # Handle case where there's neither general strategy nor breakdown
+        print(f"{Fore.YELLOW}No portfolio strategy reasoning available.{Style.RESET_ALL}")
+
     # Add options trading decisions if available
     if "options_decisions" in result:
         print_options_decisions(result["options_decisions"])
@@ -573,16 +594,16 @@ def print_portfolio_status(portfolio_state: dict) -> None:
 
 def print_options_decisions(options_decisions: Dict[str, Dict]) -> None:
     """
-    Print formatted options trading decisions.
+    Print formatted options trading decisions. (OLD - Kept for potential compatibility, use print_options_analysis_summary for detailed table)
     
     Args:
         options_decisions: Dict containing options decisions for multiple tickers
     """
     if not options_decisions:
-        print(f"{Fore.YELLOW}No options trading decisions available{Style.RESET_ALL}")
+        # print(f"{Fore.YELLOW}No options trading decisions available{Style.RESET_ALL}") # Suppressed redundant message
         return
         
-    print(f"\n{Fore.WHITE}{Style.BRIGHT}OPTIONS TRADING DECISIONS:{Style.RESET_ALL}")
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}OPTIONS TRADING DECISIONS (Legacy View):{Style.RESET_ALL}")
     options_table_data = []
     
     for ticker, decision in options_decisions.items():
@@ -604,8 +625,8 @@ def print_options_decisions(options_decisions: Dict[str, Dict]) -> None:
         option_type = decision.get('option_type', '').upper()
         strike = decision.get('strike_price', 0)
         expiration = decision.get('expiration_date', '')
-        quantity = decision.get('quantity', 0)
-        confidence = decision.get('confidence', 0)
+        quantity = decision.get('quantity', 0) # Note: Quantity here is from analysis, not final execution
+        # confidence = decision.get('confidence', 0) # Not shown in this legacy view
         reasoning = decision.get('reasoning', '')
         
         # Format the strike/expiration
@@ -615,24 +636,116 @@ def print_options_decisions(options_decisions: Dict[str, Dict]) -> None:
         action_color = {
             'BUY': Fore.GREEN,
             'SELL': Fore.RED,
-            'CLOSE': Fore.YELLOW,
+            'CLOSE': Fore.YELLOW, # Assuming CLOSE might be an action
         }.get(action, Fore.WHITE)
         
+        # Wrap reasoning
+        wrapped_reasoning = ""
+        current_line = ""
+        max_line_length = 45 # Adjusted width
+        for word in reasoning.split():
+            if len(current_line) + len(word) + 1 > max_line_length:
+                wrapped_reasoning += current_line + "\n"
+                current_line = word
+            else:
+                if current_line:
+                    current_line += " " + word
+                else:
+                    current_line = word
+        if current_line:
+            wrapped_reasoning += current_line
+            
         options_table_data.append([
             f"{Fore.CYAN}{underlying}{Style.RESET_ALL}",
             f"{action_color}{action}{Style.RESET_ALL}",
             f"{Fore.WHITE}{option_ticker}{Style.RESET_ALL}",
             f"{Fore.WHITE}{strike_exp}{Style.RESET_ALL}",
-            f"{action_color}{quantity}{Style.RESET_ALL}",
-            f"{Fore.WHITE}{reasoning}{Style.RESET_ALL}"
+            f"{action_color}{quantity}{Style.RESET_ALL}", # Show analysis quantity
+            f"{Fore.WHITE}{wrapped_reasoning}{Style.RESET_ALL}"
         ])
     
-    options_headers = [f"{Fore.WHITE}Underlying", "Action", "Option Ticker", "Strike/Type/Exp", "Quantity", "Reasoning"]
+    options_headers = [f"{Fore.WHITE}Underlying", "Action", "Option Ticker", "Strike/Type/Exp", "Analysis Qty", "Reasoning"]
     print(tabulate(options_table_data, headers=options_headers, tablefmt="grid"))
+
+# --- NEW: Detailed Options Analysis Summary Table ---
+def print_options_analysis_summary(options_decisions: Dict[str, Dict]) -> None:
+    """
+    Print a detailed summary table of the generated options analysis decisions.
+    
+    Args:
+        options_decisions: Dict containing options analysis results for multiple tickers.
+                           Expected format per ticker: 
+                           {'ticker': 'O:XYZ...', 'action': 'buy', 'option_type': 'put', ...}
+                           or {'action': 'none', 'reasoning': '...'}
+    """
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}OPTIONS ANALYSIS SUMMARY:{Style.RESET_ALL}")
+    if not options_decisions:
+        print(f"{Fore.YELLOW}No options analysis results available.{Style.RESET_ALL}")
+        return
+        
+    table_data = []
+    for underlying_ticker, decision in options_decisions.items():
+        action = decision.get('action', 'none').upper()
+        
+        if action == 'NONE':
+            # Handle 'hold' or 'none' decision for the underlying
+            reason = decision.get('reasoning', 'Stock action is hold/none, no options analysis performed.')
+            wrapped_reasoning = _wrap_text(reason, 50)
+            table_data.append([
+                f"{Fore.CYAN}{underlying_ticker}{Style.RESET_ALL}",
+                f"{Fore.YELLOW}NO ACTION{Style.RESET_ALL}", # Action
+                "-", # Option Ticker
+                "-", # Details
+                "-", # Strategy
+                "-", # Confidence
+                "-", # Limit Price
+                f"{Fore.WHITE}{wrapped_reasoning}{Style.RESET_ALL}" # Reasoning
+            ])
+            continue
+            
+        # Extract details for active option decisions
+        option_ticker = decision.get('ticker', '-')
+        option_type = decision.get('option_type', '?').upper()
+        strike = decision.get('strike_price', 0)
+        expiration = decision.get('expiration_date', '????-??-??')
+        strategy = decision.get('strategy', '-').replace('_', ' ').title()
+        confidence = decision.get('confidence', 0.0)
+        limit_price = decision.get('limit_price') # Can be None
+        reasoning = decision.get('reasoning', 'No reasoning provided.')
+        
+        # Format columns
+        action_color = {'BUY': Fore.GREEN, 'SELL': Fore.RED}.get(action, Fore.WHITE)
+        option_details = f"{strike:.2f} {option_type} {expiration}"
+        confidence_str = f"{confidence:.1f}%" if confidence is not None else "-"
+        limit_price_str = f"${limit_price:.2f}" if limit_price is not None else "-"
+        wrapped_reasoning = _wrap_text(reasoning, 50) # Use helper for wrapping
+
+        table_data.append([
+            f"{Fore.CYAN}{underlying_ticker}{Style.RESET_ALL}",
+            f"{action_color}{action}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{option_ticker}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{option_details}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{strategy}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{confidence_str}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{limit_price_str}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{wrapped_reasoning}{Style.RESET_ALL}"
+        ])
+    
+    headers = [
+        f"{Fore.WHITE}Underlying", 
+        "Action", 
+        "Option Ticker", 
+        "Details", 
+        "Strategy", 
+        "Confidence", 
+        "Limit Price", 
+        "Reasoning"
+    ]
+    print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
 def print_options_execution_summary(execution_results: Dict[str, Dict]) -> None:
     """
-    Print a summary table of executed options trades.
+    Print a summary table of executed options trades, similar to stock summary.
     
     Args:
         execution_results: Results from PortfolioManager.execute_options_decision.
@@ -643,7 +756,7 @@ def print_options_execution_summary(execution_results: Dict[str, Dict]) -> None:
         return
         
     table_data = []
-    for ticker, result in execution_results.items():
+    for ticker, result in execution_results.items(): # Ticker here is the *option* ticker
         status = result.get("status", "unknown").upper()
         message = result.get("message", "")
         order = result.get("order")
@@ -654,29 +767,55 @@ def print_options_execution_summary(execution_results: Dict[str, Dict]) -> None:
             'EXECUTED': Fore.GREEN,
         }.get(status, Fore.MAGENTA)
         
+        action = "-"
+        qty = "-"
+        order_id_short = "-"
+        order_status = "-"
+        order_type = "-"
+        limit_price_str = "-"
+
         if status == "SKIPPED":
-            order_id_short = "-"
-            order_status = "-"
+            pass # Defaults are fine
         elif status == "ERROR":
-            order_id_short = "-"
-            order_status = "-"
+            pass # Defaults are fine
         elif status == "EXECUTED" and order:
+            action = order.get("side", "-").upper()
+            qty = order.get("qty", "-")
             order_id = order.get("id", "-")
             order_id_short = order_id.split('-')[0] + "..." if order_id != "-" else "-"
             order_status = order.get("status", "-")
+            order_type = order.get("type", "-").upper()
+            limit_price = order.get("limit_price")
+            if order_type == "LIMIT" and limit_price is not None:
+                limit_price_str = f"@{limit_price}"
         else:
-            order_id_short = "-"
-            order_status = status
-        
+            order_status = status # Show original status if possible
+
+        # Wrap message - Increased width
+        wrapped_message = _wrap_text(message, 45) # Use helper and increased width
+            
         table_data.append([
-            f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
+            f"{Fore.CYAN}{ticker}{Style.RESET_ALL}", # Option Ticker
             f"{status_color}{status}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{action}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{qty}{Style.RESET_ALL}",
+            f"{Fore.WHITE}{order_type} {limit_price_str}{Style.RESET_ALL}",
             f"{Fore.WHITE}{order_status}{Style.RESET_ALL}",
             f"{Fore.WHITE}{order_id_short}{Style.RESET_ALL}",
-            f"{Fore.WHITE}{message}{Style.RESET_ALL}"
+            f"{Fore.WHITE}{wrapped_message}{Style.RESET_ALL}"
         ])
     
-    options_headers = [f"{Fore.WHITE}Ticker", "Result", "Order Status", "Order ID", "Message"]
+    # Match headers with stock execution summary where possible
+    options_headers = [
+        f"{Fore.WHITE}Option Ticker", 
+        "Result", 
+        "Action", 
+        "Qty", 
+        "Type", 
+        "Order Status", 
+        "Order ID", 
+        "Message"
+    ]
     print(tabulate(table_data, headers=options_headers, tablefmt="grid"))
 
 def print_options_positions(positions: Dict[str, Dict]) -> None:
@@ -736,3 +875,26 @@ def print_options_positions(positions: Dict[str, Dict]) -> None:
         "Days to Exp"
     ]
     print(tabulate(table_data, headers=options_headers, tablefmt="grid"))
+
+# --- Helper function for text wrapping ---
+def _wrap_text(text: str, width: int) -> str:
+    """Wrap text to a specified width."""
+    if not isinstance(text, str):
+        text = str(text) # Ensure text is a string
+        
+    wrapped = ""
+    current_line = ""
+    for word in text.split():
+        if len(current_line) + len(word) + 1 > width:
+            wrapped += current_line + "\n"
+            current_line = word
+        else:
+            if current_line:
+                current_line += " " + word
+            else:
+                current_line = word
+    if current_line:
+        wrapped += current_line
+    return wrapped
+
+# --- End Options Trading Display Functions ---
