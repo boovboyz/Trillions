@@ -132,6 +132,26 @@ files = [
 frozenlist = ">=1.1.0"
 
 [[package]]
+name = "alpaca-py"
+version = "0.40.0"
+description = "The Official Python SDK for Alpaca APIs"
+optional = false
+python-versions = "<4.0.0,>=3.8.0"
+groups = ["main"]
+files = [
+    {file = "alpaca_py-0.40.0-py3-none-any.whl", hash = "sha256:6484bfa77d0d974d62b170b8a42d9d351737bf03d03e23d36214b663554ef339"},
+    {file = "alpaca_py-0.40.0.tar.gz", hash = "sha256:7cf11193b467e902b1f2fa3449e287ad85b1921258340995c371a3751ba130f6"},
+]
+
+[package.dependencies]
+msgpack = ">=1.0.3,<2.0.0"
+pandas = ">=1.5.3"
+pydantic = ">=2.0.3,<3.0.0"
+requests = ">=2.30.0,<3.0.0"
+sseclient-py = ">=1.7.2,<2.0.0"
+websockets = ">=10.4"
+
+[[package]]
 name = "alpaca-trade-api"
 version = "3.2.0"
 description = "Alpaca API python client"
@@ -3417,6 +3437,18 @@ pymysql = ["pymysql"]
 sqlcipher = ["sqlcipher3_binary"]
 
 [[package]]
+name = "sseclient-py"
+version = "1.8.0"
+description = "SSE client for Python"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "sseclient-py-1.8.0.tar.gz", hash = "sha256:c547c5c1a7633230a38dc599a21a2dc638f9b5c297286b48b46b935c71fac3e8"},
+    {file = "sseclient_py-1.8.0-py2.py3-none-any.whl", hash = "sha256:4ecca6dc0b9f963f8384e9d7fd529bf93dd7d708144c4fb5da0e0a1a926fee83"},
+]
+
+[[package]]
 name = "tabulate"
 version = "0.9.0"
 description = "Pretty-print tabular data"
@@ -3863,4 +3895,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.9"
-content-hash = "4d047835638af2fc481e4253d258d37c00dafeb84635c5a6498c64db814cbdb8"
+content-hash = "df3d4a95d36cd550159048996707e5d3bb9114ad76f9efdb6155682229af5221"

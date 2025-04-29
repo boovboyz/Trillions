@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 class OptionsStrategy(BaseModel):
     """Model for an options trading strategy."""
     strategy_type: Literal[
-        "long_call", "long_put", "covered_call", "cash_secured_put", 
-        "bull_call_spread", "bear_put_spread", "iron_condor", "calendar_spread",
-        "none"  # No suitable options strategy
+        "long_call", "long_put", 
+        "covered_call", "cash_secured_put",
+        "bull_call_spread", "bear_put_spread", 
+        "none"  # Keep 'none' for cases where no strategy is appropriate
     ]
     confidence: float = Field(description="Confidence in the strategy, between 0 and 100")
     reasoning: str = Field(description="Reasoning for the strategy selection")
@@ -59,25 +60,31 @@ class OptionsContractDecision(BaseModel):
     greeks: Dict[str, float] = Field(description="Option Greeks")
 
 
-# Define the structure for a single leg within a multi-leg decision
+# Define the model for a single leg within a multi-leg strategy
 class OptionLeg(BaseModel):
     ticker: str = Field(description="The option contract ticker for this leg")
     action: Literal["buy", "sell"] = Field(description="Action for this leg")
-    option_type: Literal["call", "put"] = Field(description="Option type for this leg")
-    strike_price: float = Field(description="Strike price for this leg")
-    limit_price: Optional[float] = Field(description="Estimated limit price for this leg order")
+    option_type: Literal["call", "put"] = Field(description="Type of option for this leg")
+    strike_price: float = Field(description="Strike price of this leg")
+    limit_price: Optional[float] = Field(description="Estimated limit price for this leg")
 
 
-# Define the structure for the overall multi-leg decision
+# Define the model for a multi-leg (spread) decision
 class MultiLegOptionsDecision(BaseModel):
     underlying_ticker: str = Field(description="The underlying stock ticker")
-    strategy: str = Field(description="The multi-leg strategy being employed (e.g., bear_put_spread)")
-    confidence: float = Field(description="Confidence in the overall spread decision (0-100)")
-    reasoning: str = Field(description="Reasoning for choosing this specific spread")
-    legs: List[OptionLeg] = Field(description="List containing details for each leg of the spread")
-    net_limit_price: Optional[float] = Field(description="Net limit price for the spread order (debit>0, credit<0), if applicable/calculable")
-    stop_loss_on_underlying: Optional[float] = Field(description="Stop loss condition based on underlying price movement")
-    take_profit_on_underlying: Optional[float] = Field(description="Take profit condition based on underlying price movement")
+    strategy: str = Field(description="The options strategy name (e.g., bull_call_spread)")
+    confidence: float = Field(description="Confidence in the decision (0-100)")
+    reasoning: str = Field(description="Reasoning for choosing this spread")
+    legs: List[OptionLeg] = Field(description="List of legs involved in the spread")
+    net_limit_price: Optional[float] = Field(description="Estimated net debit (positive) or credit (negative) for the spread")
+    stop_loss_on_underlying: Optional[float] = Field(description="Suggested underlying price for stop loss, if applicable")
+    take_profit_on_underlying: Optional[float] = Field(description="Suggested underlying price for take profit, if applicable")
+    # Add action field for consistency with single-leg and filtering logic
+    action: Literal["open_spread", "close_spread", "none"] = Field(default="open_spread", description="Overall action for the spread")
+
+
+class OptionsAnalysis(BaseModel):
+    """Model for the overall options analysis output for a ticker."""
 
 
 def options_analysis_agent(state: AgentState):
@@ -260,8 +267,6 @@ def determine_options_strategy(
             - "cash_secured_put": Sell put secured by cash (income strategy, potential acquisition)
             - "bull_call_spread": Buy lower strike call, sell higher strike call (bullish, defined risk/reward)
             - "bear_put_spread": Buy higher strike put, sell lower strike put (bearish, defined risk/reward)
-            - "iron_condor": Sell call spread and put spread (neutral, income strategy, range-bound)
-            - "calendar_spread": Sell near-term, buy longer-term option (neutral/volatility play)
             - "none": No options strategy appropriate
             
             IMPORTANT: If the confidence level is below 60%, default to "none" as the options strategy, as the certainty isn't high enough to warrant options exposure.
@@ -294,7 +299,7 @@ def determine_options_strategy(
             
             Determine the optimal options strategy for this scenario and return a strategy recommendation in this exact JSON format:
             {{
-                "strategy_type": "long_call|long_put|covered_call|cash_secured_put|bull_call_spread|bear_put_spread|iron_condor|calendar_spread|none",
+                "strategy_type": "long_call|long_put|covered_call|cash_secured_put|bull_call_spread|bear_put_spread|none",
                 "confidence": float between 0 and 100,
                 "reasoning": "string with detailed explanation",
                 "max_days_to_expiration": integer (recommended DTE),
@@ -365,7 +370,7 @@ def select_optimal_contract(
         return None
         
     # Determine if we are dealing with single contracts or pairs
-    is_spread_strategy = options_strategy.strategy_type in ["bull_call_spread", "bear_put_spread", "iron_condor"]
+    is_spread_strategy = options_strategy.strategy_type in ["bull_call_spread", "bear_put_spread"]
     is_pair_list = isinstance(filtered_contracts_or_pairs[0], tuple) if filtered_contracts_or_pairs else False
 
     if is_spread_strategy and not is_pair_list:

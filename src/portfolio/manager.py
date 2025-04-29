@@ -178,6 +178,8 @@ class PortfolioManager:
             'position_value': position_value,
             'cash_ratio': cash_ratio,
             'buying_power': float(account['buying_power']),
+            # Add options buying power, fallback to regular BP
+            'options_buying_power': float(account.get('options_buying_power', account['buying_power'])),
             'margin_used': portfolio_value - cash_value - float(account['equity']),
             'day_trades_remaining': 3 - account['daytrade_count'],
             'total_exposure': total_exposure,
@@ -915,11 +917,22 @@ class PortfolioManager:
         
         # Filter orders from today
         today = datetime.now().date()
-        today_orders = [
-            order for order in all_orders
-            if (order['filled_at'] and
-                datetime.fromisoformat(order['filled_at'].replace('Z', '+00:00')).date() == today)
-        ]
+        today_orders = []
+        for order in all_orders:
+            filled_at = order.get('filled_at')
+            if filled_at:
+                try:
+                    # Use pd.to_datetime for robust parsing (handles Timestamps, strings, etc.)
+                    # Make timezone-aware if naive, then compare dates
+                    filled_dt = pd.to_datetime(filled_at)
+                    if filled_dt.tzinfo is None:
+                        filled_dt = filled_dt.tz_localize('UTC') # Assume UTC if naive
+                    
+                    if filled_dt.date() == today:
+                        today_orders.append(order)
+                except Exception as e:
+                    self.logger.warning(f"Could not parse filled_at timestamp '{filled_at}' for order {order.get('id')}: {e}")
+                    continue # Skip this order if parsing fails
         
         return today_orders
     

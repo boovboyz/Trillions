@@ -333,7 +333,7 @@ class PolygonClient:
         min_delta: float = 0.1,
         min_liquidity_score: float = 30,
         max_contracts: int = 10 # Limit final selection size
-    ) -> List[OptionContract]:
+    ) -> Union[List[OptionContract], List[Tuple[OptionContract, OptionContract]]]:
         """
         Filter options chain by a given strategy using the Option Chain Snapshot.
         1. Fetches full chain snapshot.
@@ -569,13 +569,13 @@ class PolygonClient:
                  if short_candidates:
                      best_short = min(short_candidates, key=lambda s: s.strike_price - long_call.strike_price)
                      # Represent pair as a tuple or dedicated object if needed
-                     # For now, just return the long leg of the best pair found
-                     # Need a better way to return pairs for execution
-                     candidates.append(long_call) # Placeholder: just add long leg for now
-                     # TODO: Modify return type or structure to handle pairs properly
+                     # Append the pair (long_call, best_short)
+                     spread_pairs.append((long_call, best_short))
              
-             # Simple approach for now: return best long legs found
-             candidates = sorted(candidates, key=lambda c: abs(c.strike_price - current_price)) # Closest to ATM
+             # Sort the found pairs. Example: Sort by liquidity of the long leg, then proximity of long leg strike to ATM
+             candidates = sorted(spread_pairs, key=lambda pair: (pair[0].liquidity_score, abs(pair[0].strike_price - current_price)), reverse=True)
+             # Note: The return type is now List[Tuple[OptionContract, OptionContract]] for spreads
+             # The caller needs to be adapted to handle this structure.
 
         # --- Bear Put Spread (similar logic to Bull Call Spread but with puts) ---
         elif strategy.lower() == 'bear_put_spread':

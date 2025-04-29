@@ -79,6 +79,8 @@ class PortfolioSizerAgent:
         portfolio_value = portfolio_state.get('portfolio_value', 0)
         cash = portfolio_state.get('cash', 0)
         buying_power = portfolio_state.get('buying_power', 0)
+        # Attempt to get options-specific buying power, fall back to regular BP if not found
+        options_buying_power = portfolio_state.get('options_buying_power', buying_power)
         stock_positions = portfolio_state.get('positions', {}) # {symbol: {qty: ..., side: ...}}
         options_positions = options_portfolio_state.get('positions', {}) # {option_ticker: {qty: ..., side: ...}}
 
@@ -127,7 +129,7 @@ class PortfolioSizerAgent:
             if is_multi_leg:
                 # Handle multi-leg strategy (like bear put spread)
                 final_option_quantity = self._calculate_multi_leg_option_quantity(
-                    sized_option_decision, portfolio_value, cash, buying_power
+                    sized_option_decision, portfolio_value, cash, buying_power, cash_for_csp_check=cash
                 )
                 sized_option_decision['quantity'] = final_option_quantity
             else:
@@ -147,7 +149,9 @@ class PortfolioSizerAgent:
                          )
                          final_option_quantity = self._apply_option_constraints(
                              option_ticker, option_action, target_option_quantity, current_option_price,
-                             portfolio_value, cash, options_positions
+                             portfolio_value, cash, options_positions,
+                             strike_price=sized_option_decision.get('strike_price'), 
+                             option_type=sized_option_decision.get('option_type')
                          )
                          sized_option_decision['quantity'] = final_option_quantity
 
@@ -158,6 +162,71 @@ class PortfolioSizerAgent:
                      sized_option_decision['quantity'] = existing_contracts # Close full position
                      self.logger.info(f"Sizing CLOSE action for {option_ticker} to existing quantity: {existing_contracts}")
 
+        # --- Covered Call Share Purchase Check --- 
+        # Check if the final option decision is a covered call sell and if we need to buy shares
+        if sized_option_decision and \
+           sized_option_decision.get('strategy') == 'covered_call' and \
+           sized_option_decision.get('action') == 'sell' and \
+           sized_option_decision.get('quantity', 0) > 0:
+
+            option_quantity = sized_option_decision['quantity']
+            required_shares = 100 * option_quantity
+            underlying_ticker = sized_option_decision.get('underlying_ticker')
+            
+            if not underlying_ticker:
+                self.logger.error("Covered call decision missing underlying_ticker. Cannot check/buy shares.")
+            else:
+                current_holdings = 0
+                stock_position = stock_positions.get(underlying_ticker)
+                if stock_position and stock_position.get('side') == 'long':
+                    current_holdings = int(stock_position.get('qty', 0))
+                
+                shares_to_buy = required_shares - current_holdings
+
+                if shares_to_buy > 0:
+                    self.logger.info(f"Covered call strategy for {underlying_ticker} requires {required_shares} shares, holding {current_holdings}. Will attempt to buy {shares_to_buy}.")
+                    
+                    # Create a new stock buy decision (or potentially modify existing)
+                    # Get current price for the stock
+                    current_stock_price = self._get_stock_price(underlying_ticker)
+                    if current_stock_price:
+                        # Define the new buy decision
+                        # Note: We don't use target_quantity here, just the required amount
+                        buy_decision_for_cc = {
+                            'ticker': underlying_ticker,
+                            'action': 'buy',
+                            'quantity': shares_to_buy, # This is the target quantity now
+                            'confidence': sized_option_decision.get('confidence', 100.0), # Use option confidence
+                            'reasoning': f'Auto-buying {shares_to_buy} shares for covered call strategy.'
+                        }
+                        
+                        # IMPORTANT: Re-apply constraints to this buy decision
+                        # We pass shares_to_buy as the target_quantity to check if it fits constraints
+                        final_buy_quantity = self._apply_stock_constraints(
+                            underlying_ticker, 'buy', shares_to_buy, current_stock_price,
+                            portfolio_value, cash, buying_power, stock_positions, pending_quantities
+                        )
+                        
+                        if final_buy_quantity == shares_to_buy:
+                            # If constraints allow buying the required shares, override the original stock decision
+                            self.logger.info(f"Constraints allow buying {shares_to_buy} shares for {underlying_ticker} covered call. Overriding initial stock decision.")
+                            sized_stock_decision = buy_decision_for_cc # Use the constrained decision
+                            sized_stock_decision['quantity'] = final_buy_quantity # Ensure quantity is set correctly
+                        else:
+                            # If we cannot buy the required shares, we MUST skip the covered call
+                            self.logger.warning(f"Cannot execute covered call for {underlying_ticker}: Constraints limit needed stock buy from {shares_to_buy} to {final_buy_quantity}. Skipping option trade.")
+                            sized_option_decision['quantity'] = 0
+                            sized_option_decision['skip_reason'] = f'Cannot buy required {shares_to_buy} shares due to constraints (limited to {final_buy_quantity})'
+                            # Reset stock decision to original (or hold if none existed)
+                            # This part is tricky - what was the original? Let's just set it to hold if it wasn't a buy already.
+                            if sized_stock_decision is None or sized_stock_decision.get('action') != 'buy':
+                                 sized_stock_decision = {'ticker': underlying_ticker, 'action': 'hold', 'quantity': 0, 'reasoning': 'Option skipped, reverting stock decision'}
+                    else:
+                        self.logger.error(f"Cannot buy shares for {underlying_ticker} covered call: Could not get stock price. Skipping option trade.")
+                        sized_option_decision['quantity'] = 0
+                        sized_option_decision['skip_reason'] = 'Failed to get stock price for share purchase'
+
+        # --- End Covered Call Check --- 
 
         self.logger.info(f"Final Sized Stock Decision: {sized_stock_decision}")
         if sized_option_decision:
@@ -336,7 +405,7 @@ class PortfolioSizerAgent:
         self.logger.debug(f"Constrained stock qty for {symbol} ({action}): {final_quantity} (Target: {target_quantity if action in ['buy', 'short'] else 'N/A - Closing'}) (Existing: {existing_shares if existing_position else 0})")
         return final_quantity
 
-    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, options_positions: Dict) -> int:
+    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, options_positions: Dict, strike_price: Optional[float] = None, option_type: Optional[str] = None) -> int:
         """Apply portfolio constraints to the target option quantity."""
         if target_quantity <= 0 or current_price <= 0:
             return 0
@@ -377,10 +446,21 @@ class PortfolioSizerAgent:
              max_short_position_value = portfolio_value * max_short_pos_pct * self.config.get('max_options_allocation_pct', 0.15) # Similar combination as original
              max_short_position_contracts = int(max_short_position_value / contract_value) if contract_value > 0 else 0
 
-             contracts_to_target = max_short_position_contracts - existing_contracts
-             # Limit by max order, but not cash (selling generates cash/uses margin)
-             # TODO: Need margin/buying power check for selling options naked? Assuming covered/spreads for now.
-             allowed_new_contracts = min(contracts_to_target, max_order_contracts)
+             # --- Add CSP Check for Selling Puts --- 
+             max_contracts_by_cash = float('inf') # Default to no cash limit
+             if option_type == 'put' and strike_price and strike_price > 0:
+                 required_cash_per_contract = strike_price * 100
+                 if required_cash_per_contract > 0:
+                     max_contracts_by_cash = int(cash / required_cash_per_contract)
+                     self.logger.debug(f"CSP Check for selling put {option_ticker}: Strike={strike_price}, CashReqPerCont=${required_cash_per_contract:.2f}, AvailCash=${cash:.2f}, MaxContractsByCash={max_contracts_by_cash}")
+                 else:
+                      self.logger.warning(f"CSP Check for selling put {option_ticker}: Invalid required cash per contract ({required_cash_per_contract}). Skipping cash constraint.")
+             elif option_type == 'put':
+                  self.logger.warning(f"CSP Check for selling put {option_ticker}: Strike price missing or invalid. Skipping cash constraint.")
+             # --- End CSP Check ---
+             
+             # Apply constraints (Position Limit, Order Limit, Cash Limit for Puts)
+             allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash)
              allowed_new_contracts = max(0, allowed_new_contracts)
              final_quantity = min(target_quantity, allowed_new_contracts)
 
@@ -571,7 +651,7 @@ class PortfolioSizerAgent:
         self.logger.debug(f"Constrained stock qty for {symbol} ({action}): {final_quantity} (Target: {target_quantity if action in ['buy', 'short'] else 'N/A - Closing'}) (Existing: {existing_shares if existing_position else 0})")
         return final_quantity
 
-    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, options_positions: Dict) -> int:
+    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, options_positions: Dict, strike_price: Optional[float] = None, option_type: Optional[str] = None) -> int:
         """Apply portfolio constraints to the target option quantity."""
         if target_quantity <= 0 or current_price <= 0:
             return 0
@@ -612,10 +692,21 @@ class PortfolioSizerAgent:
              max_short_position_value = portfolio_value * max_short_pos_pct * self.config.get('max_options_allocation_pct', 0.15) # Similar combination as original
              max_short_position_contracts = int(max_short_position_value / contract_value) if contract_value > 0 else 0
 
-             contracts_to_target = max_short_position_contracts - existing_contracts
-             # Limit by max order, but not cash (selling generates cash/uses margin)
-             # TODO: Need margin/buying power check for selling options naked? Assuming covered/spreads for now.
-             allowed_new_contracts = min(contracts_to_target, max_order_contracts)
+             # --- Add CSP Check for Selling Puts --- 
+             max_contracts_by_cash = float('inf') # Default to no cash limit
+             if option_type == 'put' and strike_price and strike_price > 0:
+                 required_cash_per_contract = strike_price * 100
+                 if required_cash_per_contract > 0:
+                     max_contracts_by_cash = int(cash / required_cash_per_contract)
+                     self.logger.debug(f"CSP Check for selling put {option_ticker}: Strike={strike_price}, CashReqPerCont=${required_cash_per_contract:.2f}, AvailCash=${cash:.2f}, MaxContractsByCash={max_contracts_by_cash}")
+                 else:
+                      self.logger.warning(f"CSP Check for selling put {option_ticker}: Invalid required cash per contract ({required_cash_per_contract}). Skipping cash constraint.")
+             elif option_type == 'put':
+                  self.logger.warning(f"CSP Check for selling put {option_ticker}: Strike price missing or invalid. Skipping cash constraint.")
+             # --- End CSP Check ---
+             
+             # Apply constraints (Position Limit, Order Limit, Cash Limit for Puts)
+             allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash)
              allowed_new_contracts = max(0, allowed_new_contracts)
              final_quantity = min(target_quantity, allowed_new_contracts)
 
@@ -750,7 +841,7 @@ class PortfolioSizerAgent:
         self.logger.debug(f"Constrained spread qty for {spread_decision.get('underlying_ticker')} {spread_decision.get('strategy')}: {final_quantity} (Target: {target_quantity}) (Constraints: Pos={max_contracts_by_position_limit}, Ord={max_contracts_by_order_limit}, Cash={max_contracts_by_cash if net_debit > 0 else 'N/A'})")
         return final_quantity 
 
-    def _calculate_multi_leg_option_quantity(self, spread_decision: Dict[str, Any], portfolio_value: float, cash: float, buying_power: float) -> int:
+    def _calculate_multi_leg_option_quantity(self, spread_decision: Dict[str, Any], portfolio_value: float, cash: float, buying_power: float, cash_for_csp_check: float) -> int:
         """
         Calculate the quantity for a multi-leg options strategy (like spreads).
         Relies on internal config for risk limits, not input max_position_value.
@@ -759,8 +850,9 @@ class PortfolioSizerAgent:
         Args:
             spread_decision: The spread decision dictionary including legs
             portfolio_value: Current portfolio value
-            cash: Available cash
-            buying_power: Available buying power
+            cash: Available cash (used for general sizing/reserve check)
+            buying_power: Available buying power (potentially used for other constraints)
+            cash_for_csp_check: Available cash to use for the simulated CSP check
             
         Returns:
             Quantity of spreads to trade
@@ -820,29 +912,42 @@ class PortfolioSizerAgent:
         quantity = int(usable_value / spread_risk_per_contract) if spread_risk_per_contract > 0 else 0
         initial_calculated_quantity = quantity # Store initial calculation
         
-        # --- Optional: Simulate Cash-Secured Put Buying Power Constraint for Sell Put Leg --- 
-        if self.config.get('simulate_csp_margin_for_spread_legs', False) and quantity > 0:
-            sell_put_leg = None
+        # --- Check for Cash-Secured Put requirements for put spreads ---
+        strategy = spread_decision.get('strategy', '').lower()
+        if 'put' in strategy and quantity > 0:
+            # Find the short put leg
+            short_put_leg = None
             for leg in spread_decision.get('legs', []):
                 if leg.get('action') == 'sell' and leg.get('option_type') == 'put':
-                    sell_put_leg = leg
+                    short_put_leg = leg
                     break
-            
-            if sell_put_leg:
-                sell_put_strike = sell_put_leg.get('strike_price', 0)
-                if sell_put_strike > 0:
-                    potential_csp_bp_required = sell_put_strike * 100 * quantity
-                    if potential_csp_bp_required > buying_power:
+                    
+            if short_put_leg:
+                short_put_strike = short_put_leg.get('strike_price', 0)
+                if short_put_strike > 0:
+                    # Calculate the buying power required for cash-secured put
+                    csp_requirement = short_put_strike * 100 * quantity
+                    
+                    # For bear put spreads, we need to account for collateral on the short put
+                    if csp_requirement > cash_for_csp_check:
                         self.logger.warning(
-                            f"Simulated CSP margin check for sell put leg ({sell_put_strike=}) requires ${potential_csp_bp_required:,.2f} BP, "
-                            f"but only ${buying_power:,.2f} is available. Reducing quantity from {quantity}."
+                            f"Cash-secured put requirement for {spread_decision.get('underlying_ticker')} bear put spread exceeds available cash: " +
+                            f"Required: ${csp_requirement:,.2f}, Available: ${cash_for_csp_check:,.2f}. Reducing quantity."
                         )
-                        max_qty_by_bp = int(buying_power / (sell_put_strike * 100)) 
-                        quantity = min(quantity, max_qty_by_bp)
-                        quantity = max(0, quantity) # Ensure quantity is not negative
-                        self.logger.warning(f"Quantity reduced to {quantity} based on simulated BP constraint.")
-        # --- End Optional Check --- 
-
+                        
+                        # Calculate max quantity based on available cash
+                        max_qty_by_csp = int(cash_for_csp_check / (short_put_strike * 100)) if short_put_strike > 0 else 0
+                        
+                        # Reduce quantity to match cash available for CSP requirement
+                        quantity = min(quantity, max_qty_by_csp)
+                        quantity = max(0, quantity)
+                        
+                        # Additional safety factor for paper trading
+                        safety_factor = 0.8  # Use 80% of calculated max to allow for market fluctuations
+                        quantity = int(quantity * safety_factor)
+                        
+                        self.logger.warning(f"Reduced quantity to {quantity} based on cash-secured put requirements")
+        
         # Log the calculation details (using initial quantity before optional check)
         self.logger.info(
             f"Sizing multi-leg {spread_decision.get('strategy')} for {spread_decision.get('underlying_ticker')}: "
