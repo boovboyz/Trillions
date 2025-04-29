@@ -460,21 +460,27 @@ class TradingManager:
                      
                      # Store results keyed by ticker for summary
                      if stock_exec:
-                          stock_execution_results[ticker] = stock_exec 
+                          stock_execution_results[ticker] = stock_exec
                           combined_execution_results[ticker] = stock_exec # Use stock result if available
+                     
+                     # --- MODIFIED: Check if option_exec is not None before processing ---
                      if option_exec:
                           # For multi-leg options, use the underlying ticker as the key
-                          if isinstance(option_exec.get('order'), list):
+                          # Check if 'order' exists and is a list (indicating multi-leg)
+                          order_info = option_exec.get('order')
+                          if isinstance(order_info, list):
                               # This is a multi-leg option
                               option_execution_results[ticker] = option_exec
-                          else:
+                          elif isinstance(order_info, dict):
                               # For single-leg options, use the option ticker
-                              option_key = option_exec.get('order', {}).get('symbol', ticker)
+                              option_key = order_info.get('symbol', ticker) # Safely get symbol
                               option_execution_results[option_key] = option_exec
-                              
+                          # else: Handle cases where order_info is None or unexpected type? Log maybe?
+
                           # If only option trade, use its result for combined summary
                           if ticker not in combined_execution_results:
                               combined_execution_results[ticker] = option_exec
+                     # --- END MODIFICATION ---
 
                  # Print Execution Summary Table using combined results
                  print_execution_summary(combined_execution_results)
