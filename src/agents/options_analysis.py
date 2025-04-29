@@ -56,7 +56,6 @@ class OptionsContractDecision(BaseModel):
     limit_price: Optional[float] = Field(description="Limit price for the order")
     stop_loss: Optional[float] = Field(description="Stop loss price")
     take_profit: Optional[float] = Field(description="Take profit price")
-    max_position_value: float = Field(description="Maximum position value in dollars")
     greeks: Dict[str, float] = Field(description="Option Greeks")
 
 
@@ -79,7 +78,6 @@ class MultiLegOptionsDecision(BaseModel):
     net_limit_price: Optional[float] = Field(description="Net limit price for the spread order (debit>0, credit<0), if applicable/calculable")
     stop_loss_on_underlying: Optional[float] = Field(description="Stop loss condition based on underlying price movement")
     take_profit_on_underlying: Optional[float] = Field(description="Take profit condition based on underlying price movement")
-    max_position_value: float = Field(description="Maximum value allocated to the entire spread position")
 
 
 def options_analysis_agent(state: AgentState):
@@ -433,12 +431,11 @@ Return ONLY the JSON object representing the chosen spread, adhering strictly to
     ],
     "net_limit_price": <float or null>, // Estimated net debit (positive) or credit (negative)
     "stop_loss_on_underlying": <float or null>,
-    "take_profit_on_underlying": <float or null>,
-    "max_position_value": <float> // Estimated max value/risk of the spread
+    "take_profit_on_underlying": <float or null>
 }}
 ```
 
-IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object. Use the actual calculated or estimated values where indicated by `<...>`. Ensure `legs` is a list containing exactly two dictionaries, one for the buy leg and one for the sell leg.
+IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object. Use the actual calculated or estimated values where indicated by `<...>`. Ensure `legs` is a list containing exactly two dictionaries, one for the buy leg and one for the sell leg. Verify correct brace placement.
 """)
         pydantic_model_for_llm = MultiLegOptionsDecision # Use a new Pydantic model for spreads
 
@@ -463,7 +460,6 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
     "limit_price": <float>,
     "stop_loss": <float or null>,
     "take_profit": <float or null>,
-    "max_position_value": <float>,
     "greeks": {{
         "delta": <float>,
         "gamma": <float>,
@@ -473,7 +469,7 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
 }}
 ```
 
-IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object. Use the actual values where indicated by `<...>`.
+IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object. Use the actual values where indicated by `<...>` Verify correct brace placement.
 """)
         pydantic_model_for_llm = OptionsContractDecision # Use existing model for single leg
 

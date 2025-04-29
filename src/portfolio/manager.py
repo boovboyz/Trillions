@@ -74,11 +74,15 @@ class PortfolioManager:
             'enable_trailing_stops': True,              # NEW: Enable ATR trailing stops
             'trailing_stop_atr_multiplier': 2.5,       # NEW: ATR multiplier for trailing stops
             'atr_lookback_period': 14,                  # NEW: Lookback period for ATR calculation
+            'simulate_csp_margin_for_spread_legs': True, # Add the simulation flag
         }
         
         # Override defaults with provided config
         if config:
             self.config.update(config)
+        
+        # Add the simulation flag (can be overridden by external config if needed)
+        self.config['simulate_csp_margin_for_spread_legs'] = self.config.get('simulate_csp_margin_for_spread_legs', True)
         
         self._last_update = None  # Timestamp of last update
         self.update_interval = 30  # Update portfolio status every 30 seconds
@@ -980,25 +984,36 @@ class PortfolioManager:
                     action = 'short'
                     
                 decision = {
+                    'ticker': symbol, # Add ticker for sizer
                     'action': action,
-                    'quantity': scaling_size,
+                    # 'quantity': scaling_size, # Quantity is determined by sizer
                     'confidence': 80,  # High confidence for scaling decisions
                     'reason': 'Scale in'
                 }
                 
-                # Size the decision properly
-                sized_decisions = self._calculate_position_sizes(
-                    {symbol: decision}, 
-                    portfolio_state
-                )
+                # Size the decision properly using the PortfolioSizerAgent
+                try:
+                    sized_stock_decision, _ = self.portfolio_sizer_agent.calculate_combined_sizes(
+                        stock_decision=decision,
+                        option_decision=None,
+                        portfolio_state=portfolio_state,
+                        options_portfolio_state=self.get_options_portfolio_state() # Get fresh options state
+                    )
+                except Exception as e:
+                     self.logger.error(f"Error sizing scale_in decision for {symbol}: {e}", exc_info=True)
+                     continue # Skip execution if sizing fails
                 
                 # Execute if quantity > 0
-                if sized_decisions[symbol]['quantity'] > 0:
-                    result = self.alpaca.execute_trading_decisions(sized_decisions)
+                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0:
+                    # Wrap for Alpaca execution function
+                    execution_input = {symbol: sized_stock_decision}
+                    result = self.alpaca.execute_trading_decisions(execution_input)
                     management_actions[symbol] = {
                         'action': 'scale_in',
-                        'result': result[symbol]
+                        'result': result.get(symbol) # Use .get for safety
                     }
+                elif sized_stock_decision:
+                     self.logger.info(f"Skipping scale_in execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
                     
             elif scale_out:
                 # We're profitable, consider reducing position
@@ -1013,25 +1028,36 @@ class PortfolioManager:
                     action = 'cover'
                     
                 decision = {
+                    'ticker': symbol, # Add ticker for sizer
                     'action': action,
-                    'quantity': scaling_size,
+                    # 'quantity': scaling_size, # Quantity is determined by sizer
                     'confidence': 80,  # High confidence for scaling decisions
                     'reason': 'Scale out'
                 }
                 
-                # Size the decision properly
-                sized_decisions = self._calculate_position_sizes(
-                    {symbol: decision}, 
-                    portfolio_state
-                )
+                # Size the decision properly using the PortfolioSizerAgent
+                try:
+                    sized_stock_decision, _ = self.portfolio_sizer_agent.calculate_combined_sizes(
+                        stock_decision=decision,
+                        option_decision=None,
+                        portfolio_state=portfolio_state,
+                        options_portfolio_state=self.get_options_portfolio_state() # Get fresh options state
+                    )
+                except Exception as e:
+                     self.logger.error(f"Error sizing scale_out decision for {symbol}: {e}", exc_info=True)
+                     continue # Skip execution if sizing fails
                 
                 # Execute if quantity > 0
-                if sized_decisions[symbol]['quantity'] > 0:
-                    result = self.alpaca.execute_trading_decisions(sized_decisions)
+                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0:
+                    # Wrap for Alpaca execution function
+                    execution_input = {symbol: sized_stock_decision}
+                    result = self.alpaca.execute_trading_decisions(execution_input)
                     management_actions[symbol] = {
                         'action': 'scale_out',
-                        'result': result[symbol]
+                        'result': result.get(symbol) # Use .get for safety
                     }
+                elif sized_stock_decision:
+                     self.logger.info(f"Skipping scale_out execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
                     
         return management_actions
     
@@ -1111,9 +1137,10 @@ class PortfolioManager:
                     'reason': stop_reason # Use dynamic reason
                 }
                 
-                # Execute decision
-                # Ensure we size correctly even for stop/target exits
-                sized_decisions = self._calculate_position_sizes({symbol: decision}, portfolio_state)
+                # Directly create sized_decisions structure
+                sized_decisions = {symbol: decision}
+
+                # Ensure quantity is positive before executing
                 if sized_decisions[symbol]['quantity'] > 0:
                     result = self.alpaca.execute_trading_decisions(sized_decisions)
                     management_actions[symbol] = {
@@ -1121,7 +1148,7 @@ class PortfolioManager:
                         'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
                     }
                 else:
-                    logger.warning(f"Stop loss for {symbol} resulted in zero quantity after sizing.")
+                    logger.warning(f"Stop loss for {symbol} resulted in zero quantity after calculation.")
 
             elif target_hit:
                 # Create take profit order to exit position or scale out
@@ -1129,10 +1156,10 @@ class PortfolioManager:
                 
                 # Determine quantity (full exit or scale out)
                 exit_quantity = qty
-                if self.config['position_scaling']:
+                if self.config.get('position_scaling', False): # Use .get for safety
                     # Scale out with percentage of position
-                    exit_quantity = max(1, int(qty * self.config['scaling_size_pct']))
-                
+                    exit_quantity = max(1, int(qty * self.config.get('scaling_size_pct', 0.5))) # Use .get and provide default
+
                 decision = {
                     'action': action,
                     'quantity': exit_quantity,
@@ -1140,8 +1167,10 @@ class PortfolioManager:
                     'reason': 'Take profit triggered'
                 }
                 
-                # Execute decision
-                sized_decisions = self._calculate_position_sizes({symbol: decision}, portfolio_state)
+                # Directly create sized_decisions structure
+                sized_decisions = {symbol: decision}
+
+                # Ensure quantity is positive before executing
                 if sized_decisions[symbol]['quantity'] > 0:
                     result = self.alpaca.execute_trading_decisions(sized_decisions)
                     management_actions[symbol] = {
@@ -1149,7 +1178,7 @@ class PortfolioManager:
                         'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
                     }
                 else:
-                    logger.warning(f"Take profit for {symbol} resulted in zero quantity after sizing.")
+                    logger.warning(f"Take profit for {symbol} resulted in zero quantity after calculation.")
                     
         return management_actions
                 

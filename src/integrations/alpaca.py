@@ -11,6 +11,7 @@ import logging
 import pandas as pd
 import numpy as np
 import re
+import requests
 
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import APIError
@@ -19,6 +20,8 @@ from colorama import Fore, Style, init
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Custom JSON encoder to handle non-serializable types
 class CustomJSONEncoder(json.JSONEncoder):
