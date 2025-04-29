@@ -55,6 +55,7 @@ class AlpacaClient:
         """
         self.api_key = os.getenv('ALPACA_API_KEY')
         self.api_secret = os.getenv('ALPACA_API_SECRET')
+        self.logger = logging.getLogger(__name__)
         
         if not self.api_key or not self.api_secret:
             init(autoreset=True)
@@ -217,36 +218,66 @@ class AlpacaClient:
         time_in_force: str = 'day',
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
-        client_order_id: Optional[str] = None
+        client_order_id: Optional[str] = None,
+        **kwargs # Accept extra arguments like order_class, legs
     ) -> Dict[str, Any]:
         """
         Submit an order to Alpaca.
+        Handles both simple and complex (multi-leg) orders.
         
         Args:
-            symbol: The ticker symbol.
-            qty: Quantity of shares.
+            symbol: The ticker symbol (or underlying for multi-leg).
+            qty: Quantity of shares/contracts.
             side: 'buy' or 'sell'.
             type: Order type ('market', 'limit', 'stop', 'stop_limit').
             time_in_force: Time in force ('day', 'gtc', 'opg', 'cls', 'ioc', 'fok').
-            limit_price: Limit price for limit and stop-limit orders.
-            stop_price: Stop price for stop and stop-limit orders.
+            limit_price: Limit price for limit/stop-limit (or net price for multi-leg limit).
+            stop_price: Stop price for stop/stop-limit orders.
             client_order_id: Custom client order ID.
+            **kwargs: Additional arguments for the Alpaca API (e.g., order_class, legs).
             
         Returns:
             Order information.
         """
         try:
-            order = self.api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                type=type,
-                time_in_force=time_in_force,
-                limit_price=limit_price,
-                stop_price=stop_price,
-                client_order_id=client_order_id
-            )
+            # Prepare base arguments
+            order_params = {
+                'symbol': symbol,
+                'qty': qty,
+                'side': side,
+                'type': type,
+                'time_in_force': time_in_force,
+                'limit_price': limit_price,
+                'stop_price': stop_price,
+                'client_order_id': client_order_id
+            }
+
+            # Add complex order arguments if present in kwargs
+            if 'order_class' in kwargs:
+                order_params['order_class'] = kwargs['order_class']
+            if 'legs' in kwargs:
+                 # Ensure legs is None if empty list, otherwise pass the list
+                 legs_data = kwargs['legs']
+                 order_params['legs'] = legs_data if legs_data else None
+                 
+            # Remove None values from base params to avoid submitting them if not needed
+            # Keep client_order_id even if None, as the API might handle it
+            params_to_submit = {k: v for k, v in order_params.items() if v is not None or k == 'client_order_id'}
             
+            # Filter out stop_price if it's None and not a stop/stop_limit order
+            if type not in ['stop', 'stop_limit'] and 'stop_price' in params_to_submit and params_to_submit['stop_price'] is None:
+                 del params_to_submit['stop_price']
+            # Filter out limit_price if it's None and not a limit/stop_limit order
+            if type not in ['limit', 'stop_limit'] and 'limit_price' in params_to_submit and params_to_submit['limit_price'] is None:
+                 del params_to_submit['limit_price']
+                 
+            self.logger.debug(f"Submitting order to Alpaca API with params: {params_to_submit}") # Log parameters being sent
+
+            # Call the underlying API method with the constructed parameters
+            # Try accessing trading_client if it exists, otherwise use self.api directly
+            order = self.api.submit_order(**params_to_submit)
+            
+            # Return standardized dictionary
             return {
                 'id': order.id,
                 'client_order_id': order.client_order_id,
@@ -256,14 +287,18 @@ class AlpacaClient:
                 'filled_qty': float(order.filled_qty),
                 'type': order.type,
                 'time_in_force': order.time_in_force,
-                'limit_price': float(order.limit_price) if order.limit_price else None,
-                'stop_price': float(order.stop_price) if order.stop_price else None,
+                'limit_price': float(order.limit_price) if hasattr(order, 'limit_price') and order.limit_price is not None else None,
+                'stop_price': float(order.stop_price) if hasattr(order, 'stop_price') and order.stop_price is not None else None,
                 'status': order.status,
-                'created_at': order.created_at
+                'created_at': order.created_at,
+                'legs': order.legs if hasattr(order, 'legs') else None # Include legs in response if available
             }
         except APIError as e:
-            print(f"Error submitting order for {symbol}: {e}")
+            self.logger.error(f"API Error submitting order for {symbol}: {e} (Params: {params_to_submit})")
             raise
+        except Exception as e:
+             self.logger.error(f"Unexpected Error submitting order for {symbol}: {e} (Params: {params_to_submit})")
+             raise
     
     def cancel_order(self, order_id: str) -> bool:
         """
@@ -698,6 +733,19 @@ class AlpacaOptionsTrader(AlpacaTrader):
         # Set up options-specific configuration
         logging.info("Options trading client initialized.")
         
+        # Initialize the alpaca-py trading client for options trading if available
+        try:
+            from alpaca.trading.client import TradingClient
+            self.trading_client = TradingClient(
+                api_key=self.api_key,
+                secret_key=self.api_secret,
+                paper=paper
+            )
+            logger.info("Initialized alpaca-py TradingClient")
+        except (ImportError, Exception) as e:
+            logger.warning(f"Could not initialize alpaca-py TradingClient: {e}. Using alpaca-trade-api only.")
+            self.trading_client = None
+    
     def _convert_polygon_ticker_to_occ(self, polygon_ticker: str) -> str:
         """
         Convert a Polygon.io options ticker (e.g., O:AAPL230616C00150000)
@@ -877,155 +925,273 @@ class AlpacaOptionsTrader(AlpacaTrader):
         if is_multi_leg:
             # This is a multi-leg decision (e.g., a spread)
             underlying_ticker = option_decision.get('underlying_ticker', '')
-            if not underlying_ticker:
-                return {
-                    'status': 'error',
-                    'message': 'Multi-leg option decision missing underlying_ticker',
-                    'order': None
-                }
-                
-            leg_orders = []
-            leg_results = []
-            overall_status = 'executed' # Assume success unless a leg fails
-            combined_message = f"Multi-leg {option_decision.get('strategy','spread')} for {underlying_ticker}: "
+            strategy = option_decision.get('strategy','spread')
             
-            submitted_leg_orders = [] # Keep track of successfully submitted orders
-            error_occurred = False
-
+            if not underlying_ticker:
+                return {'status': 'error', 'message': 'Multi-leg option decision missing underlying_ticker', 'order': None}
+                
             # Use the overall quantity decided by the sizer for each leg
             spread_quantity = int(option_decision.get('quantity', 0))
-
             if spread_quantity <= 0:
-                 return {
-                    'status': 'skipped',
-                    'message': f"Multi-leg spread skipped due to zero quantity (Original decision: {underlying_ticker})",
-                    'order': None
-                }
+                 return {'status': 'skipped', 'message': f"Multi-leg spread {strategy} for {underlying_ticker} skipped due to zero quantity", 'order': None}
 
-            for leg in option_decision['legs']:
+            # --- Prepare legs for complex order submission ---
+            order_legs = []
+            error_in_legs = False
+            for leg in option_decision.get('legs', []):
                 leg_ticker = leg.get('ticker', '')
                 leg_action = leg.get('action', '').lower()
-                leg_limit_price = leg.get('limit_price')
+                leg_limit_price = leg.get('limit_price')  # Get each leg's limit price
                 
                 if not leg_ticker or leg_action not in ['buy', 'sell']:
-                    logger.error(f"Invalid leg in multi-leg decision: {leg}")
-                    overall_status = 'error'
-                    leg_results.append({'status': 'error', 'message': 'Invalid leg data'})
-                    error_occurred = True
-                    continue # Skip this leg
-                    
+                    logger.error(f"Invalid leg data in multi-leg decision for {underlying_ticker}: {leg}")
+                    error_in_legs = True
+                    break # Stop processing if a leg is invalid
+
                 try:
                     occ_ticker = self._convert_polygon_ticker_to_occ(leg_ticker)
-                    order_func = self.buy_option if leg_action == 'buy' else self.sell_option
-                    leg_order = order_func(
-                        option_symbol=occ_ticker,
-                        quantity=spread_quantity, # Use same quantity for each leg
-                        order_type='limit' if leg_limit_price else 'market',
-                        limit_price=leg_limit_price
-                    )
-                    leg_orders.append(leg_order) # Store individual order details
-                    leg_results.append({'status': 'executed', 'message': f'{leg_action.capitalize()} {spread_quantity} {occ_ticker}', 'order': leg_order})
-                    # Add successfully submitted order for potential cancellation
-                    submitted_leg_orders.append(leg_order)
+                    order_legs.append({
+                        "symbol": occ_ticker,
+                        "qty": spread_quantity,
+                        "side": leg_action,
+                        "limit_price": leg_limit_price  # Include the leg-specific limit price
+                    })
                 except Exception as e:
-                    logger.error(f"Error executing leg {leg_ticker} in multi-leg spread: {e}")
-                    overall_status = 'error'
-                    leg_results.append({'status': 'error', 'message': str(e)})
-                    error_occurred = True
-                    break # Stop processing legs if one fails
-           
-            # If any leg failed, cancel any submitted orders to maintain the spread integrity
-            if error_occurred and submitted_leg_orders:
-                combined_message += "Error occurred, cancelling any submitted legs. "
-                for order in submitted_leg_orders:
-                    try:
-                        self.cancel_order(order['id'])
-                        combined_message += f"Cancelled {order['id']}. "
-                    except Exception as cancel_err:
-                        combined_message += f"Failed to cancel {order['id']}: {cancel_err}. "
-            
-            # Compile result message
-            for i, result in enumerate(leg_results):
-                combined_message += f"Leg {i+1}: {result['message']}. "
+                    logger.error(f"Error processing leg {leg_ticker} for {underlying_ticker}: {e}")
+                    error_in_legs = True
+                    break # Stop processing if a leg fails
+
+            if error_in_legs:
+                 return {'status': 'error', 'message': f'Invalid leg data found for multi-leg spread {strategy} for {underlying_ticker}', 'order': None}
+
+            if len(order_legs) != len(option_decision.get('legs', [])):
+                 # Should not happen if error_in_legs worked, but safety check
+                 return {'status': 'error', 'message': f'Mismatch between parsed legs and original legs for {strategy} for {underlying_ticker}', 'order': None}
+                 
+            # --- Try to submit multi-leg orders using individual leg orders ---
+            try:
+                logging.info(f"Submitting multi-leg {strategy} for {underlying_ticker} as individual orders")
+                results = []
                 
-            # Return combined result
-            return {
-                'status': overall_status,
-                'message': combined_message,
-                'order': leg_orders if leg_orders else None # Return all leg orders
-            }
+                # For bull call spreads, make sure to buy the call first before selling the call
+                # This way the account has the long position as collateral for the short position
+                if strategy.lower() == 'bull_call_spread':
+                    # Separate buy and sell legs
+                    buy_legs = [leg for leg in order_legs if leg["side"] == "buy"]
+                    sell_legs = [leg for leg in order_legs if leg["side"] == "sell"]
+                    
+                    # First submit all the buy orders
+                    buy_orders = []
+                    buy_symbols = []
+                    for leg in buy_legs:
+                        buy_symbol = leg["symbol"]
+                        buy_symbols.append(buy_symbol)
+                        logger.info(f"Submitting BUY leg for {buy_symbol} at {leg['limit_price']}")
+                        leg_order = self.api.submit_order(
+                            symbol=buy_symbol,
+                            qty=leg["qty"],
+                            side=leg["side"],
+                            type="market",  # Change to market order for faster execution
+                            time_in_force="day",
+                            limit_price=None  # No limit price for market orders
+                        )
+                        
+                        # Convert to dictionary format for consistency
+                        leg_order_dict = {
+                            'id': leg_order.id,
+                            'client_order_id': leg_order.client_order_id,
+                            'symbol': leg_order.symbol,
+                            'side': leg_order.side,
+                            'qty': float(leg_order.qty),
+                            'filled_qty': float(leg_order.filled_qty),
+                            'type': leg_order.type,
+                            'time_in_force': leg_order.time_in_force,
+                            'limit_price': float(leg_order.limit_price) if hasattr(leg_order, 'limit_price') and leg_order.limit_price is not None else None,
+                            'status': leg_order.status,
+                            'created_at': leg_order.created_at
+                        }
+                        results.append(leg_order_dict)
+                        buy_orders.append(leg_order.id)
+                    
+                    # Add delay to ensure buy orders are processed and potentially filled
+                    logger.info(f"Waiting for buy orders to be processed before submitting sell orders for {underlying_ticker} bull call spread")
+                    max_wait = 10  # Maximum seconds to wait
+                    wait_interval = 2  # Check every 2 seconds
+                    positions_confirmed = False
+                    
+                    # Wait until we confirm our long positions are established
+                    for i in range(max_wait // wait_interval):
+                        time.sleep(wait_interval)
+                        
+                        # Check if our positions exist now
+                        try:
+                            # Get current positions
+                            all_positions = self.api.list_positions()
+                            position_symbols = [p.symbol for p in all_positions]
+                            
+                            # Check if all buy symbols are in our positions
+                            missing_positions = [sym for sym in buy_symbols if sym not in position_symbols]
+                            
+                            if not missing_positions:
+                                logger.info(f"Confirmed all long positions for {underlying_ticker} bull call spread")
+                                positions_confirmed = True
+                                break
+                            else:
+                                logger.info(f"Still waiting for positions to be established for: {missing_positions}")
+                        except Exception as e:
+                            logger.warning(f"Error checking positions: {e}")
+                    
+                    if not positions_confirmed:
+                        logger.warning(f"Could not confirm all long positions after {max_wait} seconds - proceeding with sell orders anyway")
+                    
+                    # Then submit all the sell orders
+                    for leg in sell_legs:
+                        logger.info(f"Submitting SELL leg for {leg['symbol']} at {leg['limit_price']}")
+                        try:
+                            leg_order = self.api.submit_order(
+                                symbol=leg["symbol"],
+                                qty=leg["qty"],
+                                side=leg["side"],
+                                type="limit",  # Use limit for sell orders
+                                time_in_force="day",
+                                limit_price=leg["limit_price"]
+                            )
+                            
+                            # Convert to dictionary format for consistency
+                            leg_order_dict = {
+                                'id': leg_order.id,
+                                'client_order_id': leg_order.client_order_id,
+                                'symbol': leg_order.symbol,
+                                'side': leg_order.side,
+                                'qty': float(leg_order.qty),
+                                'filled_qty': float(leg_order.filled_qty),
+                                'type': leg_order.type,
+                                'time_in_force': leg_order.time_in_force,
+                                'limit_price': float(leg_order.limit_price) if hasattr(leg_order, 'limit_price') and leg_order.limit_price is not None else None,
+                                'status': leg_order.status,
+                                'created_at': leg_order.created_at
+                            }
+                            results.append(leg_order_dict)
+                        except Exception as e:
+                            error_msg = str(e)
+                            logger.error(f"Error submitting sell leg for {leg['symbol']}: {error_msg}")
+                            if "account not eligible" in error_msg:
+                                logger.error(f"Account not eligible to trade uncovered options. Need to establish long position first.")
+                                # The previous error is propagated to the caller
+                                raise
+                else:
+                    # For other strategies, submit legs in the original order
+                    for leg in order_legs:
+                        # Place each leg as a separate order with its own limit price
+                        leg_order = self.api.submit_order(
+                            symbol=leg["symbol"],
+                            qty=leg["qty"],
+                            side=leg["side"],
+                            type="limit",  # Always use limit for options
+                            time_in_force="day",
+                            limit_price=leg["limit_price"]  # Use the leg's specific limit price
+                        )
+                        
+                        # Convert to dictionary format for consistency
+                        leg_order_dict = {
+                            'id': leg_order.id,
+                            'client_order_id': leg_order.client_order_id,
+                            'symbol': leg_order.symbol,
+                            'side': leg_order.side,
+                            'qty': float(leg_order.qty),
+                            'filled_qty': float(leg_order.filled_qty),
+                            'type': leg_order.type,
+                            'time_in_force': leg_order.time_in_force,
+                            'limit_price': float(leg_order.limit_price) if hasattr(leg_order, 'limit_price') and leg_order.limit_price is not None else None,
+                            'status': leg_order.status,
+                            'created_at': leg_order.created_at
+                        }
+                        results.append(leg_order_dict)
+                
+                # Create a synthetic multi-leg order result
+                order_id = f"multi-{datetime.now().timestamp()}"
+                logger.info(f"Successfully submitted multi-leg {strategy} for {underlying_ticker}. Order ID: {order_id}")
+                
+                return {
+                    'status': 'executed',
+                    'message': f"Multi-leg {strategy} for {underlying_ticker} submitted successfully.",
+                    'order': {
+                        'id': order_id,
+                        'client_order_id': f"multi-{datetime.now().timestamp()}",
+                        'symbol': underlying_ticker,
+                        'side': order_legs[0]['side'],  # Use primary side (first leg)
+                        'qty': float(spread_quantity),
+                        'filled_qty': 0.0,
+                        'type': 'limit',
+                        'time_in_force': 'day',
+                        'limit_price': option_decision.get('net_limit_price'),
+                        'status': 'submitted',
+                        'created_at': datetime.now(),
+                        'legs': results
+                    }
+                }
+            except Exception as e:
+                error_message = str(e)
+                logger.error(f"Error submitting multi-leg {strategy} order for {underlying_ticker}: {error_message}")
+                
+                # Detailed error message for common issues
+                if "account not eligible" in error_message or "insufficient options buying power" in error_message:
+                     # Provide a more specific message for common paper trading issues
+                     error_message = f"Broker rejected multi-leg order: {error_message}. (Check paper trading permissions/level for spreads or buying power)."
+                elif "MULTILEG" in error_message:
+                     error_message = f"Multi-leg order type not supported in current API version. You may need to update your Alpaca account for Level 3 options or update the API library."
+                
+                return {
+                    'status': 'error',
+                    'message': f'Error submitting multi-leg order: {error_message}',
+                    'order': None
+                }
         else:
-            # Single leg option
+            # --- Single-leg options logic ---
+            # (Keep the original single-leg logic here, slightly adjusted for clarity)
             polygon_ticker = option_decision.get('ticker', '')
             action = option_decision.get('action', '').lower()
             quantity = int(option_decision.get('quantity', 0))
             limit_price = option_decision.get('limit_price')
             
             if not polygon_ticker:
-                return {
-                    'status': 'error',
-                    'message': 'Missing option ticker in single-leg decision',
-                    'order': None
-                }
+                return {'status': 'error', 'message': 'Missing option ticker in single-leg decision', 'order': None}
                 
             if action not in ['buy', 'sell', 'close']:
-                return {
-                    'status': 'error',
-                    'message': f'Invalid action "{action}" for option order',
-                    'order': None
-                }
+                return {'status': 'error', 'message': f'Invalid action "{action}" for option order', 'order': None}
                 
             if quantity <= 0:
-                return {
-                    'status': 'skipped',
-                    'message': f'Option order for {polygon_ticker} skipped due to zero quantity',
-                    'order': None
-                }
+                return {'status': 'skipped', 'message': f'Option order for {polygon_ticker} skipped due to zero quantity', 'order': None}
                 
-            # Convert Polygon ticker to OCC format
             try:
                 occ_ticker = self._convert_polygon_ticker_to_occ(polygon_ticker)
             except Exception as e:
-                return {
-                    'status': 'error',
-                    'message': f'Error converting option ticker {polygon_ticker} to OCC format: {e}',
-                    'order': None
-                }
+                return {'status': 'error', 'message': f'Error converting option ticker {polygon_ticker} to OCC format: {e}', 'order': None}
                 
-            # Execute the order
             try:
-                if action == 'buy':
-                    order = self.buy_option(
-                        option_symbol=occ_ticker,
-                        quantity=quantity,
-                        order_type='limit' if limit_price else 'market',
-                        limit_price=limit_price
-                    )
-                    return {
-                        'status': 'executed',
-                        'message': f'Buy order for {quantity} {occ_ticker} submitted successfully',
-                        'order': order
-                    }
-                elif action == 'sell' or action == 'close':
-                    order = self.sell_option(
-                        option_symbol=occ_ticker,
-                        quantity=quantity,
-                        order_type='limit' if limit_price else 'market',
-                        limit_price=limit_price
-                    )
-                    return {
-                        'status': 'executed',
-                        'message': f'Sell order for {quantity} {occ_ticker} submitted successfully',
-                        'order': order
-                    }
-            except Exception as e:
-                logger.error(f"Error executing option order for {occ_ticker}: {e}")
+                order_func = self.buy_option if action == 'buy' else self.sell_option
+                # Handle 'close' by determining the correct side based on hypothetical position (or assume sell)
+                # A more robust 'close' might need position checking logic if kept separate
+                if action == 'close':
+                     logger.warning(f"Executing single-leg 'close' action for {occ_ticker} as a 'sell'. For accurate closing, ensure quantity matches position.")
+                     order_func = self.sell_option # Assume close means sell if not buying
+                
+                order = order_func(
+                    option_symbol=occ_ticker,
+                    quantity=quantity,
+                    order_type='limit' if limit_price else 'market',
+                    limit_price=limit_price
+                )
+                action_desc = 'Buy' if action == 'buy' else 'Sell' # Simplified description
                 return {
-                    'status': 'error',
-                    'message': f'Error executing option order: {e}',
-                    'order': None
+                    'status': 'executed',
+                    'message': f'{action_desc} order for {quantity} {occ_ticker} submitted successfully',
+                    'order': order
                 }
-    
+            except Exception as e:
+                logger.error(f"Error executing single-leg option order for {occ_ticker}: {e}")
+                return {'status': 'error', 'message': f'Error executing option order: {e}', 'order': None}
+
     def execute_options_decisions(
         self, 
         options_decisions: Dict[str, Dict]
