@@ -1351,80 +1351,105 @@ class PortfolioManager:
 
         for ticker, decision in decisions.items():
             current_decision = decision.copy()
-            action = current_decision.get('action', 'none').lower()
+            
+            # Check if this is a multi-leg strategy (like bull call spread, bear put spread)
+            is_multi_leg = 'legs' in current_decision and isinstance(current_decision['legs'], list)
+            
+            if is_multi_leg:
+                # For multi-leg strategies (like bear put spread)
+                
+                # Skip if legs are empty
+                if not current_decision['legs']:
+                    current_decision['action'] = 'none'
+                    current_decision['skip_reason'] = 'Multi-leg decision has empty legs list'
+                    filtered_decisions[ticker] = current_decision
+                    continue
+                
+                # Use underlying ticker for context if available
+                log_context_ticker = current_decision.get('underlying_ticker', ticker)
+                
+                # Set action to 'open_spread' if not set
+                if 'action' not in current_decision or current_decision.get('action', '').lower() == 'none':
+                    current_decision['action'] = 'open_spread'
+                
+                # Consider this an opening trade for risk filtering purposes
+                effective_action = 'open_spread'
+            else:
+                # For single leg option
+                action = current_decision.get('action', 'none').lower()
+                
+                # Skip if already no action
+                if action == 'none':
+                    filtered_decisions[ticker] = current_decision
+                    continue
+                
+                # Make sure we have a valid ticker
+                log_context_ticker = current_decision.get('ticker', '')
+                if not log_context_ticker:
+                    self.logger.warning(f"Risk Filter: Setting action to 'none' due to missing option ticker in single-leg decision.")
+                    current_decision['action'] = 'none'
+                    current_decision['skip_reason'] = 'Invalid option ticker'
+                    filtered_decisions[ticker] = current_decision
+                    continue
+                    
+                # Determine effective action type (opening vs closing)
+                if action == 'close':
+                    effective_action = 'close'
+                else:  # 'buy' or 'sell'
+                    effective_action = 'open'
 
-            # Skip if already no action
-            if action == 'none':
-                filtered_decisions[ticker] = current_decision
-                continue
+            # === Apply Portfolio-Level Risk Checks ===
 
-            # Get the option details needed for checks
-            option_ticker = current_decision.get('ticker', '')
-            # estimated_price = current_decision.get('limit_price', 0) or 0 # Price/value checks moved to sizing agent
-
-            # Skip if no valid option ticker (fundamental check)
-            if not option_ticker:
-                self.logger.warning(f"Risk Filter: Setting {ticker} action to 'none' due to missing option ticker.")
-                current_decision['original_action'] = action
-                current_decision['action'] = 'none'
-                current_decision['skip_reason'] = 'Invalid option ticker'
-                filtered_decisions[ticker] = current_decision
-                continue
-
-            # Check max drawdown threshold
-            if max_drawdown_reached and action in ['buy']: # Only restrict opening new risk
-                self.logger.warning(f"Risk Filter: Setting {option_ticker} action to 'none' due to max drawdown.")
-                current_decision['original_action'] = action
+            # Check max drawdown threshold (restrict opening new risk)
+            if max_drawdown_reached and effective_action in ['open', 'open_spread']:
+                self.logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max drawdown.")
+                current_decision['original_action'] = current_decision.get('action', 'none')
                 current_decision['action'] = 'none'
                 current_decision['skip_reason'] = 'Max drawdown threshold reached'
                 filtered_decisions[ticker] = current_decision
                 continue
 
-            # Check max trades per day
-            if max_trades_reached and action in ['buy', 'sell']: # Restrict opening new trades
-                self.logger.warning(f"Risk Filter: Setting {option_ticker} action to 'none' due to max trades per day.")
-                current_decision['original_action'] = action
+            # Check max trades per day (restrict opening new risk)
+            if max_trades_reached and effective_action in ['open', 'open_spread']:
+                self.logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max trades per day.")
+                current_decision['original_action'] = current_decision.get('action', 'none')
                 current_decision['action'] = 'none'
                 current_decision['skip_reason'] = 'Maximum trades per day reached'
                 filtered_decisions[ticker] = current_decision
                 continue
 
-            # Check day trading restrictions
-            position_exists = option_ticker in options_portfolio_state.get('positions', {})
-            is_day_trade = False
-            if position_exists and action == 'close': # Only closing can be a day trade for options here
-                today_orders = self._get_today_trades()
-                option_today_orders = [
-                    order for order in today_orders
-                    if order.get('symbol') == option_ticker and order.get('status') == 'filled'
-                ]
-                if option_today_orders:
-                    is_day_trade = True
+            # Check day trading restrictions (currently only for closing single legs)
+            # Multi-leg day trade check would be more complex
+            if effective_action == 'close': 
+                position_exists = log_context_ticker in options_portfolio_state.get('positions', {})
+                is_day_trade = False
+                if position_exists:
+                    today_orders = self._get_today_trades()
+                    option_today_orders = [
+                        order for order in today_orders
+                        if order.get('symbol') == log_context_ticker and order.get('status') == 'filled'
+                    ]
+                    if option_today_orders:
+                        is_day_trade = True
 
-            if is_day_trade and not day_trades_available:
-                # Note: Unlike stocks, we block closing options if it's a day trade and none available.
-                # Covering shorts was prioritized for stocks, less critical for options? Review this policy.
-                self.logger.warning(f"Risk Filter: Setting {option_ticker} {action} to 'none' due to no day trades available.")
-                current_decision['original_action'] = action
-                current_decision['action'] = 'none' # Change action to none
-                current_decision['skip_reason'] = 'No day trades available'
-                filtered_decisions[ticker] = current_decision
-                continue
+                if is_day_trade and not day_trades_available:
+                    self.logger.warning(f"Risk Filter: Setting {log_context_ticker} {current_decision.get('action', 'none')} to 'none' due to no day trades available.")
+                    current_decision['original_action'] = current_decision.get('action', 'none')
+                    current_decision['action'] = 'none'
+                    current_decision['skip_reason'] = 'No day trades available'
+                    filtered_decisions[ticker] = current_decision
+                    continue
 
-            # Check options allocation limits (only for BUY actions)
-            if action == 'buy' and options_market_value >= max_options_allocation_value:
-                self.logger.warning(f"Risk Filter: Setting {option_ticker} action to 'none' due to max options allocation reached ({options_market_value:.2f} >= {max_options_allocation_value:.2f}).")
-                current_decision['original_action'] = action
+            # Check options allocation limits (only for OPENING actions)
+            if effective_action in ['open', 'open_spread'] and options_market_value >= max_options_allocation_value:
+                self.logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max options allocation reached ({options_market_value:.2f} >= {max_options_allocation_value:.2f}).")
+                current_decision['original_action'] = current_decision.get('action', 'none')
                 current_decision['action'] = 'none'
                 current_decision['skip_reason'] = 'Maximum options allocation reached'
                 filtered_decisions[ticker] = current_decision
                 continue
 
-            # Check single option allocation limit & cash - MOVED TO SIZING AGENT
-            # These checks require price and quantity, which are determined later.
-            # The sizing agent will ensure the final position doesn't exceed these limits.
-
-            # If we passed all filters, keep the decision (potentially modified action)
+            # If we passed all filters, keep the decision 
             filtered_decisions[ticker] = current_decision
 
         return filtered_decisions
@@ -1693,17 +1718,29 @@ class PortfolioManager:
 
         filtered_option_decision = None
         if option_decision:
-            # Wrap in dict for filter method compatibility
-            # Ensure the option decision dict has the 'ticker' key before using it
-            option_ticker_key = option_decision.get('ticker')
-            if option_ticker_key:
-                temp_option_decisions = {option_ticker_key: option_decision}
-                filtered_result = self._apply_options_risk_management(temp_option_decisions, portfolio_state, options_portfolio_state)
-                filtered_option_decision = filtered_result.get(option_ticker_key)
+            # Check if this is a multi-leg decision or a single-leg decision
+            is_multi_leg = 'legs' in option_decision and isinstance(option_decision['legs'], list)
+            
+            if is_multi_leg:
+                # For multi-leg, use underlying_ticker as the key
+                option_ticker_key = option_decision.get('underlying_ticker')
+                if option_ticker_key:
+                    temp_option_decisions = {option_ticker_key: option_decision}
+                    filtered_result = self._apply_options_risk_management(temp_option_decisions, portfolio_state, options_portfolio_state)
+                    filtered_option_decision = filtered_result.get(option_ticker_key)
+                else:
+                    logger.warning(f"Multi-leg option decision received without an 'underlying_ticker' key: {option_decision}. Skipping options risk management for it.")
+                    filtered_option_decision = option_decision
             else:
-                logger.warning(f"Option decision received without a 'ticker' key: {option_decision}. Skipping options risk management for it.")
-                # Keep filtered_option_decision as None or handle appropriately
-                filtered_option_decision = option_decision # Pass it along if it has other relevant info like action='none'
+                # For single-leg, use ticker as the key
+                option_ticker_key = option_decision.get('ticker')
+                if option_ticker_key:
+                    temp_option_decisions = {option_ticker_key: option_decision}
+                    filtered_result = self._apply_options_risk_management(temp_option_decisions, portfolio_state, options_portfolio_state)
+                    filtered_option_decision = filtered_result.get(option_ticker_key)
+                else:
+                    logger.warning(f"Option decision received without a 'ticker' key: {option_decision}. Skipping options risk management for it.")
+                    filtered_option_decision = option_decision
 
         # Check if actions were changed to hold/none
         final_stock_action = filtered_stock_decision.get('action', 'hold') if filtered_stock_decision else 'hold'
@@ -1755,24 +1792,36 @@ class PortfolioManager:
         # Execute Option Order if sized quantity > 0
         if sized_option_decision and sized_option_decision.get('quantity', 0) > 0:
             logger.info(f"Executing sized option decision: {sized_option_decision}")
-            from src.integrations import AlpacaOptionsTrader # Import locally if not already available
-            options_trader = AlpacaOptionsTrader(paper=True) # Assuming paper trading
-            # Option execution expects a dict keyed by underlying or unique ID?
-            # Assuming it takes the decision dict directly for now.
-            # NEED TO CONFIRM execute_option_decision signature and input format.
-            option_orders_to_execute = {sized_option_decision['ticker']: sized_option_decision} # Adjust key if needed
-            try:
-                 # Assuming execute_options_decisions takes dict like stocks
-                 results = options_trader.execute_options_decisions(option_orders_to_execute)
-                 option_execution_result = results.get(sized_option_decision['ticker'])
-                 logger.info(f"Option Execution Result: {option_execution_result}")
-            except Exception as e:
-                 logger.error(f"Error executing option trade for {sized_option_decision['ticker']}: {e}", exc_info=True)
-                 option_execution_result = {'status': 'error', 'message': f'Option execution failed: {e}', 'order': None}
+            from src.integrations import AlpacaOptionsTrader
+            options_trader = AlpacaOptionsTrader(paper=True)
+            
+            # Determine the key for the option decision
+            option_key = None
+            if 'legs' in sized_option_decision and isinstance(sized_option_decision['legs'], list):
+                # Multi-leg strategy, use underlying_ticker as key
+                option_key = sized_option_decision.get('underlying_ticker')
+            else:
+                # Single-leg, use ticker as key
+                option_key = sized_option_decision.get('ticker')
+                
+            if not option_key:
+                logger.error(f"Missing key (ticker/underlying_ticker) for option decision: {sized_option_decision}")
+                option_execution_result = {'status': 'error', 'message': 'Missing ticker identifier', 'order': None}
+            else:
+                option_orders_to_execute = {option_key: sized_option_decision}
+                try:
+                    results = options_trader.execute_options_decisions(option_orders_to_execute)
+                    option_execution_result = results.get(option_key)
+                    logger.info(f"Option Execution Result: {option_execution_result}")
+                except Exception as e:
+                    logger.error(f"Error executing option trade for {option_key}: {e}", exc_info=True)
+                    option_execution_result = {'status': 'error', 'message': f'Option execution failed: {e}', 'order': None}
         elif option_decision: # If there was an initial decision but quantity is 0
             reason = sized_option_decision.get('skip_reason', 'Quantity sized to zero') if sized_option_decision else 'Filtered to none'
             option_execution_result = {'status': 'skipped', 'message': reason, 'order': None}
-            logger.info(f"Skipping option execution for {option_decision['ticker']}. Reason: {reason}")
+            # Use the underlying ticker from stock_decision for logging context, as option_decision might lack 'ticker'
+            log_ticker = stock_decision.get('ticker', option_decision.get('underlying_ticker', 'UNKNOWN'))
+            logger.info(f"Skipping option execution for {log_ticker}. Reason: {reason}")
 
         return stock_execution_result, option_execution_result
 

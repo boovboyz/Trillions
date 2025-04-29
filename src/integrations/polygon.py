@@ -8,7 +8,7 @@ import os
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Tuple
 import json
 import requests
 import math # Add math import
@@ -587,7 +587,7 @@ class PolygonClient:
             ]
             long_candidates = sorted(long_candidates, key=lambda p: p.strike_price, reverse=True) # Higher strike
 
-            spread_pairs = []
+            spread_pairs = [] # Change variable name for clarity
             for long_put in long_candidates:
                 short_candidates = [
                     s for s in strategy_contracts
@@ -598,10 +598,15 @@ class PolygonClient:
                     and s.liquidity_score >= min_liquidity_score * 0.7
                 ]
                 if short_candidates:
-                    best_short = max(short_candidates, key=lambda s: long_put.strike_price - s.strike_price)
-                    candidates.append(long_put) # Placeholder
+                    # Find the short put with the closest strike price below the long put
+                    best_short = max(short_candidates, key=lambda s: s.strike_price) # Highest strike below long_put
+                    # Append the pair (long_put, best_short)
+                    spread_pairs.append((long_put, best_short)) 
 
-            candidates = sorted(candidates, key=lambda p: abs(p.strike_price - current_price))
+            # Sort the found pairs. Example: Sort by liquidity of the long leg, then proximity of long leg strike to ATM
+            candidates = sorted(spread_pairs, key=lambda pair: (pair[0].liquidity_score, abs(pair[0].strike_price - current_price)), reverse=True)
+            # Note: The return type is now List[Tuple[OptionContract, OptionContract]] for spreads
+            # The caller needs to be adapted to handle this structure.
 
         else:
             # This is the default case if strategy doesn't match above

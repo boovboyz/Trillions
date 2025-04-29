@@ -869,65 +869,159 @@ class AlpacaOptionsTrader(AlpacaTrader):
         Returns:
             Dict with execution result
         """
-        polygon_ticker = option_decision.get('ticker', '')
-        action = option_decision.get('action', '').lower()
-        quantity = int(option_decision.get('quantity', 0))
-        limit_price = option_decision.get('limit_price')
+        is_multi_leg = 'legs' in option_decision and isinstance(option_decision['legs'], list)
         
-        if not polygon_ticker or action not in ['buy', 'sell', 'close'] or quantity <= 0:
-            return {
-                'status': 'error',
-                'message': 'Invalid options decision parameters',
-                'order': None
-            }
-        
-        try:
-            # Convert Polygon ticker to OCC format
-            occ_ticker = self._convert_polygon_ticker_to_occ(polygon_ticker)
-        except ValueError as e:
-            logging.error(f"Error converting ticker format for {polygon_ticker}: {e}")
-            return {
-                'status': 'error',
-                'message': f"Invalid ticker format provided: {polygon_ticker}",
-                'order': None
-            }
+        if is_multi_leg:
+            # This is a multi-leg decision (e.g., a spread)
+            underlying_ticker = option_decision.get('underlying_ticker', '')
+            if not underlying_ticker:
+                return {
+                    'status': 'error',
+                    'message': 'Multi-leg option decision missing underlying_ticker',
+                    'order': None
+                }
+                
+            leg_orders = []
+            leg_results = []
+            overall_status = 'executed' # Assume success unless a leg fails
+            combined_message = f"Multi-leg {option_decision.get('strategy','spread')} for {underlying_ticker}: "
+            
+            submitted_leg_orders = [] # Keep track of successfully submitted orders
+            error_occurred = False
 
-        try:
-            if action == 'buy':
-                order = self.buy_option(
-                    option_symbol=occ_ticker, # Use converted OCC ticker
-                    quantity=quantity,
-                    order_type='limit' if limit_price else 'market',
-                    limit_price=limit_price
-                )
-            elif action == 'sell':
-                order = self.sell_option(
-                    option_symbol=occ_ticker, # Use converted OCC ticker
-                    quantity=quantity,
-                    order_type='limit' if limit_price else 'market',
-                    limit_price=limit_price
-                )
-            elif action == 'close':
-                order = self.close_option_position(
-                    option_symbol=occ_ticker, # Use converted OCC ticker
-                    order_type='limit' if limit_price else 'market',
-                    limit_price=limit_price
-                )
+            # Use the overall quantity decided by the sizer for each leg
+            spread_quantity = int(option_decision.get('quantity', 0))
+
+            if spread_quantity <= 0:
+                 return {
+                    'status': 'skipped',
+                    'message': f"Multi-leg spread skipped due to zero quantity (Original decision: {underlying_ticker})",
+                    'order': None
+                }
+
+            for leg in option_decision['legs']:
+                leg_ticker = leg.get('ticker', '')
+                leg_action = leg.get('action', '').lower()
+                leg_limit_price = leg.get('limit_price')
+                
+                if not leg_ticker or leg_action not in ['buy', 'sell']:
+                    logger.error(f"Invalid leg in multi-leg decision: {leg}")
+                    overall_status = 'error'
+                    leg_results.append({'status': 'error', 'message': 'Invalid leg data'})
+                    error_occurred = True
+                    continue # Skip this leg
+                    
+                try:
+                    occ_ticker = self._convert_polygon_ticker_to_occ(leg_ticker)
+                    order_func = self.buy_option if leg_action == 'buy' else self.sell_option
+                    leg_order = order_func(
+                        option_symbol=occ_ticker,
+                        quantity=spread_quantity, # Use same quantity for each leg
+                        order_type='limit' if leg_limit_price else 'market',
+                        limit_price=leg_limit_price
+                    )
+                    leg_orders.append(leg_order) # Store individual order details
+                    leg_results.append({'status': 'executed', 'message': f'{leg_action.capitalize()} {spread_quantity} {occ_ticker}', 'order': leg_order})
+                    # Add successfully submitted order for potential cancellation
+                    submitted_leg_orders.append(leg_order)
+                except Exception as e:
+                    logger.error(f"Error executing leg {leg_ticker} in multi-leg spread: {e}")
+                    overall_status = 'error'
+                    leg_results.append({'status': 'error', 'message': str(e)})
+                    error_occurred = True
+                    break # Stop processing legs if one fails
+           
+            # If any leg failed, cancel any submitted orders to maintain the spread integrity
+            if error_occurred and submitted_leg_orders:
+                combined_message += "Error occurred, cancelling any submitted legs. "
+                for order in submitted_leg_orders:
+                    try:
+                        self.cancel_order(order['id'])
+                        combined_message += f"Cancelled {order['id']}. "
+                    except Exception as cancel_err:
+                        combined_message += f"Failed to cancel {order['id']}: {cancel_err}. "
             
+            # Compile result message
+            for i, result in enumerate(leg_results):
+                combined_message += f"Leg {i+1}: {result['message']}. "
+                
+            # Return combined result
             return {
-                'status': 'executed',
-                'message': f"{action.capitalize()} order for {quantity} contracts of {occ_ticker} submitted successfully", # Log OCC ticker
-                'order': order
+                'status': overall_status,
+                'message': combined_message,
+                'order': leg_orders if leg_orders else None # Return all leg orders
             }
+        else:
+            # Single leg option
+            polygon_ticker = option_decision.get('ticker', '')
+            action = option_decision.get('action', '').lower()
+            quantity = int(option_decision.get('quantity', 0))
+            limit_price = option_decision.get('limit_price')
             
-        except Exception as e:
-            # Log the error with the OCC ticker for clarity
-            logging.error(f"Error executing options decision for {occ_ticker} (Original: {polygon_ticker}): {e}") 
-            return {
-                'status': 'error',
-                'message': f"Error executing {action} for {occ_ticker}: {str(e)}",
-                'order': None
-            }
+            if not polygon_ticker:
+                return {
+                    'status': 'error',
+                    'message': 'Missing option ticker in single-leg decision',
+                    'order': None
+                }
+                
+            if action not in ['buy', 'sell', 'close']:
+                return {
+                    'status': 'error',
+                    'message': f'Invalid action "{action}" for option order',
+                    'order': None
+                }
+                
+            if quantity <= 0:
+                return {
+                    'status': 'skipped',
+                    'message': f'Option order for {polygon_ticker} skipped due to zero quantity',
+                    'order': None
+                }
+                
+            # Convert Polygon ticker to OCC format
+            try:
+                occ_ticker = self._convert_polygon_ticker_to_occ(polygon_ticker)
+            except Exception as e:
+                return {
+                    'status': 'error',
+                    'message': f'Error converting option ticker {polygon_ticker} to OCC format: {e}',
+                    'order': None
+                }
+                
+            # Execute the order
+            try:
+                if action == 'buy':
+                    order = self.buy_option(
+                        option_symbol=occ_ticker,
+                        quantity=quantity,
+                        order_type='limit' if limit_price else 'market',
+                        limit_price=limit_price
+                    )
+                    return {
+                        'status': 'executed',
+                        'message': f'Buy order for {quantity} {occ_ticker} submitted successfully',
+                        'order': order
+                    }
+                elif action == 'sell' or action == 'close':
+                    order = self.sell_option(
+                        option_symbol=occ_ticker,
+                        quantity=quantity,
+                        order_type='limit' if limit_price else 'market',
+                        limit_price=limit_price
+                    )
+                    return {
+                        'status': 'executed',
+                        'message': f'Sell order for {quantity} {occ_ticker} submitted successfully',
+                        'order': order
+                    }
+            except Exception as e:
+                logger.error(f"Error executing option order for {occ_ticker}: {e}")
+                return {
+                    'status': 'error',
+                    'message': f'Error executing option order: {e}',
+                    'order': None
+                }
     
     def execute_options_decisions(
         self, 
@@ -937,35 +1031,76 @@ class AlpacaOptionsTrader(AlpacaTrader):
         Execute multiple options trading decisions.
         
         Args:
-            options_decisions: Dict mapping tickers to options decisions
+            options_decisions: Dict mapping unique identifiers (like underlying ticker or spread ID)
+                               to single or multi-leg options decisions.
             
         Returns:
-            Dict of execution results for each ticker
+            Dict of execution results for each identifier.
         """
         execution_results = {}
         
-        for ticker, decision in options_decisions.items():
-            if decision.get('action', '').lower() == 'none':
-                execution_results[ticker] = {
+        for identifier, decision in options_decisions.items():
+            # Determine if this is a multi-leg strategy
+            is_multi_leg = 'legs' in decision and isinstance(decision['legs'], list)
+            
+            if is_multi_leg:
+                # For multi-leg strategy, we don't need to check 'action' field
+                # Just make sure it has legs and underlying_ticker
+                if not decision['legs']:
+                    # Empty legs list
+                    execution_results[identifier] = {
+                        'status': 'skipped',
+                        'message': f'Multi-leg decision has empty legs list for identifier {identifier}',
+                        'order': None
+                    }
+                    continue
+                elif not decision.get('underlying_ticker'):
+                    # Missing underlying ticker
+                    execution_results[identifier] = {
+                        'status': 'skipped',
+                        'message': f'Multi-leg decision missing underlying_ticker for identifier {identifier}',
+                        'order': None
+                    }
+                    continue
+                    
+                # If we got here, we have a valid multi-leg strategy with legs and underlying ticker
+                strategy = decision.get('strategy', 'spread').lower()
+                if strategy == 'none':
+                    execution_results[identifier] = {
+                        'status': 'skipped',
+                        'message': decision.get('reasoning', 'Strategy is none'),
+                        'order': None
+                    }
+                    continue
+                    
+                # Execute the multi-leg strategy
+                result = self.execute_option_decision(decision)
+                execution_results[identifier] = result
+                continue
+            
+            # For single-leg options
+            action = decision.get('action', 'none').lower()
+            if action == 'none' or decision.get('strategy', '').lower() == 'none':
+                execution_results[identifier] = {
                     'status': 'skipped',
                     'message': decision.get('reasoning', 'No action required'),
                     'order': None
                 }
                 continue
                 
-            # Check if this is a real options decision with a contract ticker
+            # Check for essential keys for single-leg
             contract_ticker = decision.get('ticker', '')
             if not contract_ticker:
-                execution_results[ticker] = {
+                execution_results[identifier] = {
                     'status': 'skipped',
-                    'message': 'Missing contract ticker',
+                    'message': f'Missing contract ticker for identifier {identifier}',
                     'order': None
                 }
                 continue
                 
-            # Execute the decision
+            # Execute the single-leg decision
             result = self.execute_option_decision(decision)
-            execution_results[ticker] = result
+            execution_results[identifier] = result
             
         return execution_results
 

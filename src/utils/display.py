@@ -677,6 +677,7 @@ def print_options_analysis_summary(options_decisions: Dict[str, Dict]) -> None:
                            Expected format per ticker: 
                            {'ticker': 'O:XYZ...', 'action': 'buy', 'option_type': 'put', ...}
                            or {'action': 'none', 'reasoning': '...'}
+                           or {'underlying_ticker': 'XYZ', 'strategy': 'bear_put_spread', 'legs': [...]}
     """
     print(f"\n{Fore.WHITE}{Style.BRIGHT}OPTIONS ANALYSIS SUMMARY:{Style.RESET_ALL}")
     if not options_decisions:
@@ -686,6 +687,48 @@ def print_options_analysis_summary(options_decisions: Dict[str, Dict]) -> None:
     table_data = []
     for underlying_ticker, decision in options_decisions.items():
         action = decision.get('action', 'none').upper()
+        
+        # Check if this is a multi-leg strategy
+        is_multi_leg = 'legs' in decision and isinstance(decision['legs'], list)
+        if is_multi_leg:
+            # For multi-leg strategies like spreads
+            strategy = decision.get('strategy', 'spread').replace('_', ' ').title()
+            confidence = decision.get('confidence', 0.0)
+            underlying = decision.get('underlying_ticker', underlying_ticker)
+            reasoning = decision.get('reasoning', 'No reasoning provided.')
+            
+            # Format leg details
+            leg_details = []
+            for leg in decision['legs']:
+                leg_action = leg.get('action', '?').upper()
+                leg_ticker = leg.get('ticker', '-')
+                leg_strike = leg.get('strike_price', 0)
+                leg_option_type = leg.get('option_type', '?').upper()
+                leg_details.append(f"{leg_action} {leg_strike} {leg_option_type}")
+            
+            # Join leg details
+            option_details = " | ".join(leg_details)
+            
+            # Get the net limit price if available
+            limit_price = decision.get('net_limit_price')
+            limit_price_str = f"${limit_price:.2f}" if limit_price is not None else "-"
+            
+            # Format confidence and reasoning
+            confidence_str = f"{confidence:.1f}%" if confidence is not None else "-"
+            wrapped_reasoning = _wrap_text(reasoning, 50)
+            
+            # Add to table
+            table_data.append([
+                f"{Fore.CYAN}{underlying}{Style.RESET_ALL}",
+                f"{Fore.GREEN}{strategy.upper()}{Style.RESET_ALL}", # Use strategy instead of action
+                f"{Fore.WHITE}MULTI-LEG{Style.RESET_ALL}", # Option Ticker
+                f"{Fore.WHITE}{option_details}{Style.RESET_ALL}",
+                f"{Fore.WHITE}{strategy}{Style.RESET_ALL}",
+                f"{Fore.WHITE}{confidence_str}{Style.RESET_ALL}",
+                f"{Fore.WHITE}{limit_price_str}{Style.RESET_ALL}",
+                f"{Fore.WHITE}{wrapped_reasoning}{Style.RESET_ALL}"
+            ])
+            continue
         
         if action == 'NONE':
             # Handle 'hold' or 'none' decision for the underlying
@@ -718,7 +761,7 @@ def print_options_analysis_summary(options_decisions: Dict[str, Dict]) -> None:
         option_details = f"{strike:.2f} {option_type} {expiration}"
         confidence_str = f"{confidence:.1f}%" if confidence is not None else "-"
         limit_price_str = f"${limit_price:.2f}" if limit_price is not None else "-"
-        wrapped_reasoning = _wrap_text(reasoning, 50) # Use helper for wrapping
+        wrapped_reasoning = _wrap_text(reasoning, 50)
 
         table_data.append([
             f"{Fore.CYAN}{underlying_ticker}{Style.RESET_ALL}",
@@ -779,20 +822,33 @@ def print_options_execution_summary(execution_results: Dict[str, Dict]) -> None:
         elif status == "ERROR":
             pass # Defaults are fine
         elif status == "EXECUTED" and order:
-            action = order.get("side", "-").upper()
-            qty = order.get("qty", "-")
-            order_id = order.get("id", "-")
-            order_id_short = order_id.split('-')[0] + "..." if order_id != "-" else "-"
-            order_status = order.get("status", "-")
-            order_type = order.get("type", "-").upper()
-            limit_price = order.get("limit_price")
-            if order_type == "LIMIT" and limit_price is not None:
-                limit_price_str = f"@{limit_price}"
+            # Handle multi-leg orders (list of orders)
+            if isinstance(order, list):
+                # For multi-leg orders, show first leg info and indicate it's multi-leg
+                if order and len(order) > 0:
+                    first_leg = order[0]
+                    action = f"MULTI-LEG ({len(order)})"
+                    qty = first_leg.get("qty", "-")
+                    order_id = first_leg.get("id", "-")
+                    order_id_short = f"{order_id.split('-')[0]}..." if order_id != "-" else "-"
+                    order_status = first_leg.get("status", "-")
+                    order_type = first_leg.get("type", "-").upper()
+            else:
+                # Regular single-leg order (dictionary)
+                action = order.get("side", "-").upper()
+                qty = order.get("qty", "-")
+                order_id = order.get("id", "-")
+                order_id_short = order_id.split('-')[0] + "..." if order_id != "-" else "-"
+                order_status = order.get("status", "-")
+                order_type = order.get("type", "-").upper()
+                limit_price = order.get("limit_price")
+                if order_type == "LIMIT" and limit_price is not None:
+                    limit_price_str = f"@{limit_price}"
         else:
             order_status = status # Show original status if possible
 
         # Wrap message - Increased width
-        wrapped_message = _wrap_text(message, 45) # Use helper and increased width
+        wrapped_message = _wrap_text(message, 45)
             
         table_data.append([
             f"{Fore.CYAN}{ticker}{Style.RESET_ALL}", # Option Ticker

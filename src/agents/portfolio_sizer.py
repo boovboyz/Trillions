@@ -121,32 +121,42 @@ class PortfolioSizerAgent:
 
         # --- Option Sizing ---
         if sized_option_decision:
-            option_ticker = sized_option_decision.get('ticker')
-            option_action = sized_option_decision.get('action', 'none').lower()
-            option_confidence = sized_option_decision.get('confidence', 50.0) # Default confidence
+            # Check if this is a multi-leg strategy
+            is_multi_leg = 'legs' in sized_option_decision and isinstance(sized_option_decision['legs'], list)
+            
+            if is_multi_leg:
+                # Handle multi-leg strategy (like bear put spread)
+                final_option_quantity = self._calculate_multi_leg_option_quantity(
+                    sized_option_decision, portfolio_value, cash
+                )
+                sized_option_decision['quantity'] = final_option_quantity
+            else:
+                # Single-leg options
+                option_ticker = sized_option_decision.get('ticker')
+                option_action = sized_option_decision.get('action', 'none').lower()
+                option_confidence = sized_option_decision.get('confidence', 50.0) # Default confidence
 
-            if option_action not in ['none', 'close']: # Size for opening trades (buy/sell)
-                current_option_price = self._get_option_price(option_ticker, sized_option_decision.get('limit_price'), options_positions)
-                if current_option_price is None:
-                    sized_option_decision['skip_reason'] = f"Could not determine current price for {option_ticker}"
-                else:
-                     target_option_quantity = self._calculate_target_option_quantity(
-                         option_ticker, option_action, option_confidence, current_option_price, portfolio_value
-                     )
-                     final_option_quantity = self._apply_option_constraints(
-                         option_ticker, option_action, target_option_quantity, current_option_price,
-                         portfolio_value, cash, options_positions
-                     )
-                     sized_option_decision['quantity'] = final_option_quantity
-                     # Add sizing info? (Optional)
-                     # sized_option_decision['sizing_info'] = {...}
+                if option_action not in ['none', 'close']: # Size for opening trades (buy/sell)
+                    current_option_price = self._get_option_price(option_ticker, sized_option_decision.get('limit_price'), options_positions)
+                    if current_option_price is None:
+                        sized_option_decision['skip_reason'] = f"Could not determine current price for {option_ticker}"
+                        sized_option_decision['quantity'] = 0 # Ensure quantity is 0 if price fails
+                    else:
+                         target_option_quantity = self._calculate_target_option_quantity(
+                             option_ticker, option_action, option_confidence, current_option_price, portfolio_value
+                         )
+                         final_option_quantity = self._apply_option_constraints(
+                             option_ticker, option_action, target_option_quantity, current_option_price,
+                             portfolio_value, cash, options_positions
+                         )
+                         sized_option_decision['quantity'] = final_option_quantity
 
-            elif option_action == 'close':
-                # Closing logic depends purely on existing position
-                 existing_position = options_positions.get(option_ticker, None)
-                 existing_contracts = abs(int(existing_position['qty'])) if existing_position else 0
-                 sized_option_decision['quantity'] = existing_contracts # Close full position
-                 self.logger.info(f"Sizing CLOSE action for {option_ticker} to existing quantity: {existing_contracts}")
+                elif option_action == 'close':
+                    # Closing logic depends purely on existing position
+                     existing_position = options_positions.get(option_ticker, None)
+                     existing_contracts = abs(int(existing_position['qty'])) if existing_position else 0
+                     sized_option_decision['quantity'] = existing_contracts # Close full position
+                     self.logger.info(f"Sizing CLOSE action for {option_ticker} to existing quantity: {existing_contracts}")
 
 
         self.logger.info(f"Final Sized Stock Decision: {sized_stock_decision}")
@@ -612,4 +622,210 @@ class PortfolioSizerAgent:
         # 'close' action is handled directly in the main method
 
         self.logger.debug(f"Constrained option qty for {option_ticker} ({action}): {final_quantity} (Target: {target_quantity})")
+        return final_quantity
+
+    # --- ADD SPREAD SIZING LOGIC ---
+    def _calculate_target_spread_quantity(self, spread_decision: Dict[str, Any], portfolio_value: float) -> int:
+        """Calculate the initial target quantity for an option spread based on its net cost/risk."""
+        if not spread_decision.get('legs') or len(spread_decision['legs']) != 2:
+            self.logger.error("Cannot calculate spread quantity: Invalid or missing legs.")
+            return 0
+
+        # Estimate net debit/credit (assuming limit prices are populated)
+        leg1_price = spread_decision['legs'][0].get('limit_price', 0)
+        leg2_price = spread_decision['legs'][1].get('limit_price', 0)
+        leg1_action = spread_decision['legs'][0].get('action', '')
+        # leg2_action = spread_decision['legs'][1].get('action', '') # Not strictly needed if we know spread type
+
+        # Determine net cost (risk for debit spreads, max profit for credit spreads - use net debit for risk calc for now)
+        # Assumes leg 0 is buy, leg 1 is sell for bear put / bull call
+        net_debit = 0
+        if leg1_action == 'buy':
+            net_debit = leg1_price - leg2_price
+        else: # Assuming leg 0 is sell
+             net_debit = leg2_price - leg1_price # Should be negative (credit)
+
+        if net_debit <= 0:
+            # For credit spreads, risk is difference in strikes minus credit.
+            # For simplicity now, we'll skip sizing purely based on credit received.
+            # Or, we could use a small assumed risk value or margin requirement.
+            # Let's prevent trading credit spreads if net_debit calc is zero or negative for now.
+            self.logger.warning(f"Calculated net debit <= 0 ({net_debit:.2f}) for spread {spread_decision.get('underlying_ticker')} {spread_decision.get('strategy')}. Cannot size based on debit risk. Skipping.")
+            return 0
+
+        spread_risk_per_contract = net_debit * 100
+        if spread_risk_per_contract <= 0:
+             self.logger.warning(f"Spread risk per contract is zero or negative for {spread_decision.get('underlying_ticker')}. Skipping.")
+             return 0
+
+        # Use a potentially different risk fraction for spreads?
+        risk_fraction = self.config.get('risk_fraction_per_spread_trade', self.config.get('risk_fraction_per_trade', 0.01))
+        confidence = spread_decision.get('confidence', 50.0)
+        confidence_factor = max(0.1, confidence / 100.0)
+        adjusted_risk_fraction = risk_fraction * confidence_factor
+
+        target_risk_value = portfolio_value * adjusted_risk_fraction
+        target_quantity = int(target_risk_value / spread_risk_per_contract)
+
+        self.logger.debug(f"Target spread qty for {spread_decision.get('underlying_ticker')} {spread_decision.get('strategy')}: {target_quantity} (RiskValue: ${target_risk_value:.2f}, SpreadRisk: ${spread_risk_per_contract:.2f}, RiskFrac: {adjusted_risk_fraction:.4f}, Conf: {confidence:.1f})")
+        return max(0, target_quantity)
+
+    def _apply_spread_constraints(self, spread_decision: Dict[str, Any], target_quantity: int, portfolio_value: float, cash: float, options_positions: Dict) -> int:
+        """Apply portfolio constraints to the target spread quantity."""
+        if target_quantity <= 0:
+            return 0
+
+        # --- Calculate Spread Cost/Risk (Similar to target calc) ---
+        leg1_price = spread_decision['legs'][0].get('limit_price', 0)
+        leg2_price = spread_decision['legs'][1].get('limit_price', 0)
+        leg1_action = spread_decision['legs'][0].get('action', '')
+        net_debit = 0
+        if leg1_action == 'buy': net_debit = leg1_price - leg2_price
+        else: net_debit = leg2_price - leg1_price
+
+        if net_debit <= 0:
+             # Cannot apply cash constraint properly for credit spreads without margin info
+             # For now, assume if target_quantity > 0, it passed the initial debit check
+             self.logger.warning(f"Net debit is zero/negative ({net_debit:.2f}) during constraint check for {spread_decision.get('underlying_ticker')}. Cash constraint might be inaccurate.")
+             # Use a nominal cost for constraint checks if debit is non-positive? Or rely on margin checks later.
+             spread_cost_per_contract = 1 # Nominal cost to avoid division by zero, assumes margin handles risk
+        else:
+             spread_cost_per_contract = net_debit * 100
+
+        if spread_cost_per_contract <= 0:
+             self.logger.error(f"Spread cost per contract is zero or negative during constraint check. Cannot size.")
+             return 0
+        # --- End Spread Cost Calc ---
+
+        # Calculate limits based on overall spread portfolio value/risk
+        # These percentages might need tuning specifically for spreads
+        max_pos_pct = self.config.get('max_options_position_size_pct', 0.05) # Limit per underlying/strategy?
+        max_order_pct = self.config.get('max_single_order_size_pct', 0.10)
+        max_total_options_pct = self.config.get('max_options_allocation_pct', 0.15)
+
+        max_position_value_allowed = portfolio_value * max_pos_pct # Max value allowed in this specific spread
+        max_order_value_allowed = portfolio_value * max_order_pct # Max value per single transaction
+        max_total_options_value_allowed = portfolio_value * max_total_options_pct
+
+        # --- Check Total Options Allocation --- TODO: Needs current options market value sum
+        # current_total_options_value = sum(pos.get('market_value', 0) for pos in options_positions.values())
+        # available_options_allocation = max(0, max_total_options_value_allowed - current_total_options_value)
+        # max_contracts_by_total_alloc = int(available_options_allocation / spread_cost_per_contract) if spread_cost_per_contract > 0 else 0
+        max_contracts_by_total_alloc = float('inf') # Placeholder: Ignore total allocation limit for now
+        # --- End Total Options Allocation Check ---
+
+        max_contracts_by_position_limit = int(max_position_value_allowed / spread_cost_per_contract) if spread_cost_per_contract > 0 else 0
+        max_contracts_by_order_limit = int(max_order_value_allowed / spread_cost_per_contract) if spread_cost_per_contract > 0 else 0
+        max_contracts_by_cash = int(cash / spread_cost_per_contract) if spread_cost_per_contract > 0 else 0
+
+        # --- Check Existing Position --- TODO: Needs better way to track spread positions
+        # Simple check: if any leg exists, assume no increase for now.
+        # A better approach would track spreads as units.
+        leg1_ticker = spread_decision['legs'][0].get('ticker')
+        leg2_ticker = spread_decision['legs'][1].get('ticker')
+        existing_contracts = 0
+        if (leg1_ticker in options_positions) or (leg2_ticker in options_positions):
+            # This is inaccurate - doesn't represent the spread qty.
+            # For simplicity, prevent adding to existing legs for now.
+            self.logger.warning(f"Existing legs found for spread {spread_decision.get('underlying_ticker')}. Preventing increase. Manual closing required.")
+            return 0 # Prevent increasing position if legs exist
+            # existing_leg1 = options_positions.get(leg1_ticker, {})
+            # existing_leg2 = options_positions.get(leg2_ticker, {})
+            # existing_contracts = min(abs(int(existing_leg1.get('qty', 0))), abs(int(existing_leg2.get('qty', 0))))
+
+        contracts_to_target = max_contracts_by_position_limit - existing_contracts
+
+        # Apply constraints
+        # For debit spreads, cash is the primary constraint.
+        # For credit spreads, margin is the constraint (not checked here).
+        allowed_new_contracts = min(
+            contracts_to_target,
+            max_contracts_by_order_limit,
+            max_contracts_by_cash if net_debit > 0 else float('inf'), # Only check cash for debit spreads
+            max_contracts_by_total_alloc
+        )
+        allowed_new_contracts = max(0, allowed_new_contracts)
+        final_quantity = min(target_quantity, allowed_new_contracts)
+
+        self.logger.debug(f"Constrained spread qty for {spread_decision.get('underlying_ticker')} {spread_decision.get('strategy')}: {final_quantity} (Target: {target_quantity}) (Constraints: Pos={max_contracts_by_position_limit}, Ord={max_contracts_by_order_limit}, Cash={max_contracts_by_cash if net_debit > 0 else 'N/A'})")
         return final_quantity 
+
+    def _calculate_multi_leg_option_quantity(self, spread_decision: Dict[str, Any], portfolio_value: float, cash: float) -> int:
+        """
+        Calculate the quantity for a multi-leg options strategy (like spreads).
+        
+        Args:
+            spread_decision: The spread decision dictionary including legs
+            portfolio_value: Current portfolio value
+            cash: Available cash
+            
+        Returns:
+            Quantity of spreads to trade
+        """
+        if not spread_decision or not spread_decision.get('legs') or portfolio_value <= 0:
+            return 0
+            
+        # Use the net debit price if available
+        net_debit = spread_decision.get('net_limit_price')
+        
+        # If net_debit is not provided, calculate it from the legs
+        if net_debit is None:
+            net_debit = 0
+            for leg in spread_decision['legs']:
+                leg_action = leg.get('action', '').lower()
+                leg_price = leg.get('limit_price', 0)
+                
+                if leg_action == 'buy':
+                    net_debit += leg_price
+                elif leg_action == 'sell':
+                    net_debit -= leg_price
+        
+        # For safety, ensure net_debit is positive for sizing
+        net_debit = abs(net_debit)
+        
+        if net_debit <= 0:
+            self.logger.warning(f"Calculated net debit <= 0 for spread {spread_decision.get('underlying_ticker')} {spread_decision.get('strategy')}. Setting small default value.")
+            net_debit = 0.01  # Set a small default to avoid division by zero
+            
+        # Calculate risk per contract (100 shares per contract)
+        spread_risk_per_contract = net_debit * 100
+        
+        # Get the max_position_value from the decision if available
+        max_position_value = spread_decision.get('max_position_value', 0)
+        
+        # If max_position_value is available and valid, use it for sizing
+        if max_position_value and max_position_value > 0:
+            # Use max_position_value as the maximum risk for the whole position
+            # Limit to a percentage of portfolio value based on config
+            max_allocation_pct = self.config.get('max_options_position_size_pct', 0.05)
+            max_allowed_value = portfolio_value * max_allocation_pct
+            
+            # Cap the position value
+            capped_position_value = min(max_position_value, max_allowed_value)
+            
+            # Also ensure we're not using more than available cash (minus reserve)
+            cash_reserve_pct = self.config.get('cash_reserve_pct', 0.1)
+            available_cash = cash * (1 - cash_reserve_pct)
+            
+            # Use the smaller of available cash or capped position value
+            usable_value = min(capped_position_value, available_cash)
+            
+            # Calculate quantity based on spread risk
+            quantity = int(usable_value / spread_risk_per_contract)
+        else:
+            # Use a risk-based approach if max_position_value isn't available
+            risk_fraction = self.config.get('risk_fraction_per_spread', 0.01)
+            confidence = spread_decision.get('confidence', 50.0)
+            confidence_factor = max(0.1, confidence / 100.0)
+            adjusted_risk_fraction = risk_fraction * confidence_factor
+            
+            target_risk_value = portfolio_value * adjusted_risk_fraction
+            quantity = int(target_risk_value / spread_risk_per_contract)
+        
+        # Ensure we have at least 1 contract if we're trading at all
+        if quantity > 0:
+            quantity = max(1, quantity)
+            
+        self.logger.info(f"Sized multi-leg strategy {spread_decision.get('strategy')} for {spread_decision.get('underlying_ticker')} to {quantity} contracts")
+        
+        return quantity 

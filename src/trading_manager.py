@@ -401,8 +401,28 @@ class TradingManager:
             combined_execution_results = {} # For overall summary
 
             # We need to iterate through all involved tickers (from stock and options decisions)
-            all_tickers = set(stock_decisions.keys()) | set(options_decisions.keys())
-            
+            all_tickers = set(stock_decisions.keys())
+
+            # Build a map of underlying tickers to option decisions for multi-leg strategies
+            underlying_to_option_map = {}
+            for option_key, option_decision in options_decisions.items():
+                # Check if this is a multi-leg strategy
+                if 'legs' in option_decision and isinstance(option_decision['legs'], list):
+                    # Use the underlying ticker as key
+                    underlying = option_decision.get('underlying_ticker')
+                    if underlying:
+                        underlying_to_option_map[underlying] = option_decision
+                        # Add the underlying to the all_tickers set
+                        all_tickers.add(underlying)
+                else:
+                    # For single-leg options, use the option ticker
+                    all_tickers.add(option_key)
+
+            # For normal options (not multi-leg), just add them directly
+            for option_key in options_decisions.keys():
+                if option_key not in underlying_to_option_map:
+                    all_tickers.add(option_key)
+
             if not all_tickers:
                  logger.info("No stock or option decisions generated. Nothing to execute.")
             else:
@@ -410,10 +430,13 @@ class TradingManager:
                  for ticker in all_tickers:
                      # Get the specific stock/option decision for this ticker (or None)
                      current_stock_decision = stock_decisions.get(ticker)
-                     # Option decisions might be keyed differently (e.g., underlying ticker)
-                     # Assuming options_decisions keys are suitable for lookup for now.
-                     # If options are keyed by underlying, adjust lookup here.
-                     current_option_decision = options_decisions.get(ticker)
+                     
+                     # First check if this ticker is an underlying for a multi-leg option strategy
+                     current_option_decision = underlying_to_option_map.get(ticker)
+                     
+                     # If not found in multi-leg map, check regular options decisions
+                     if not current_option_decision:
+                         current_option_decision = options_decisions.get(ticker)
 
                      # Prepare decisions with the ticker key added *inside* the dictionary
                      stock_decision_for_exec = None
@@ -424,16 +447,15 @@ class TradingManager:
                      option_decision_for_exec = None
                      if current_option_decision:
                          option_decision_for_exec = current_option_decision.copy()
-                         # The 'ticker' field inside current_option_decision already holds the correct
-                         # option contract ticker (e.g., O:VALE...). Do not overwrite it.
+                         # No need to add ticker for options - they already have it
 
                      if not stock_decision_for_exec and not option_decision_for_exec:
                           continue # Should not happen if ticker came from the sets
                           
                      logger.info(f"Executing combined decision for ticker: {ticker}")
                      stock_exec, option_exec = self.portfolio_manager.execute_combined_decision(
-                         stock_decision=stock_decision_for_exec,   # Pass dict with ticker inside
-                         option_decision=option_decision_for_exec # Pass dict with ticker inside
+                         stock_decision=stock_decision_for_exec,
+                         option_decision=option_decision_for_exec
                      )
                      
                      # Store results keyed by ticker for summary
@@ -441,11 +463,18 @@ class TradingManager:
                           stock_execution_results[ticker] = stock_exec 
                           combined_execution_results[ticker] = stock_exec # Use stock result if available
                      if option_exec:
-                          option_execution_results[ticker] = option_exec # Store separately
+                          # For multi-leg options, use the underlying ticker as the key
+                          if isinstance(option_exec.get('order'), list):
+                              # This is a multi-leg option
+                              option_execution_results[ticker] = option_exec
+                          else:
+                              # For single-leg options, use the option ticker
+                              option_key = option_exec.get('order', {}).get('symbol', ticker)
+                              option_execution_results[option_key] = option_exec
+                              
                           # If only option trade, use its result for combined summary
                           if ticker not in combined_execution_results:
-                              combined_execution_results[ticker] = option_exec 
-                          # If both, perhaps merge or prioritize? For now, stock result takes precedence in combined.
+                              combined_execution_results[ticker] = option_exec
 
                  # Print Execution Summary Table using combined results
                  print_execution_summary(combined_execution_results)
