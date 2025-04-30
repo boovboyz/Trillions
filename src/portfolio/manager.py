@@ -178,8 +178,6 @@ class PortfolioManager:
             'position_value': position_value,
             'cash_ratio': cash_ratio,
             'buying_power': float(account['buying_power']),
-            # Add options buying power, fallback to regular BP
-            'options_buying_power': float(account.get('options_buying_power', account['buying_power'])),
             'margin_used': portfolio_value - cash_value - float(account['equity']),
             'day_trades_remaining': 3 - account['daytrade_count'],
             'total_exposure': total_exposure,
@@ -408,9 +406,18 @@ class PortfolioManager:
             # Need lookback_period + 1 bars to calculate the first TR
             # Need additional bars for the initial SMA calculation if using Wilder's smoothing
             # Fetching more bars simplifies things (e.g., 2*lookback_period)
-            bars_df = self.alpaca.get_market_data_df(symbol, timeframe='1D', limit=lookback_period * 2)
-            if bars_df is None or len(bars_df) < lookback_period + 1:
+            bars = self.alpaca.get_market_data(symbol, timeframe='1D', limit=lookback_period * 2)
+            
+            if not bars or len(bars) < lookback_period + 1:
                 print(f"Insufficient data to calculate ATR({lookback_period}) for {symbol}")
+                return 0.0
+                
+            # Convert bars to DataFrame
+            bars_df = pd.DataFrame(bars)
+            
+            # Ensure we have the expected columns
+            if not all(col in bars_df.columns for col in ['high', 'low', 'close']):
+                print(f"Market data for {symbol} missing required columns (high, low, close)")
                 return 0.0
 
             # Calculate True Range (TR)
@@ -820,7 +827,7 @@ class PortfolioManager:
                 
             # Check if we've reached maximum drawdown threshold
             if max_drawdown_reached and action in ['buy', 'short']:
-                self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to max drawdown.")
+                logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to max drawdown.")
                 current_decision['original_action'] = action
                 current_decision['action'] = 'hold'
                 current_decision['skip_reason'] = 'Max drawdown threshold reached'
@@ -829,7 +836,7 @@ class PortfolioManager:
                 
             # Check if we've reached maximum trades per day
             if max_trades_reached and action in ['buy', 'short']:
-                self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to max trades per day.")
+                logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to max trades per day.")
                 current_decision['original_action'] = action
                 current_decision['action'] = 'hold'
                 current_decision['skip_reason'] = 'Maximum trades per day reached'
@@ -852,7 +859,7 @@ class PortfolioManager:
                     is_day_trade = True
             
             if is_day_trade and not day_trades_available and action != 'cover':
-                self.logger.warning(f"Risk Filter: Setting {symbol} {action} to 'hold' due to no day trades available.")
+                logger.warning(f"Risk Filter: Setting {symbol} {action} to 'hold' due to no day trades available.")
                 current_decision['original_action'] = action
                 current_decision['action'] = 'hold'
                 current_decision['skip_reason'] = 'No day trades available'
@@ -860,13 +867,13 @@ class PortfolioManager:
                 continue
             
             if is_day_trade and not day_trades_available and action == 'cover':
-                self.logger.warning(f"Risk Filter: Allowing {symbol} {action} despite it being a day trade with no day trades available (prioritizing cover)")
+                logger.warning(f"Risk Filter: Allowing {symbol} {action} despite it being a day trade with no day trades available (prioritizing cover)")
             
             # Check if we have enough cash (minus reserve) - ONLY for BUY actions
             if action == 'buy':
                 available_cash = cash - (portfolio_value * cash_reserve_pct)
                 if available_cash <= 0:
-                    self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to insufficient cash (below reserve). Available: {available_cash:.2f}")
+                    logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' due to insufficient cash (below reserve). Available: {available_cash:.2f}")
                     current_decision['original_action'] = action
                     current_decision['action'] = 'hold'
                     current_decision['skip_reason'] = 'Insufficient cash (below reserve)'
@@ -875,7 +882,7 @@ class PortfolioManager:
             
             # Check short selling configuration
             if action == 'short' and not self.config.get('enable_shorts', False):
-                 self.logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' because short selling is disabled.")
+                 logger.warning(f"Risk Filter: Setting {symbol} action to 'hold' because short selling is disabled.")
                  current_decision['original_action'] = action
                  current_decision['action'] = 'hold'
                  current_decision['skip_reason'] = 'Short selling disabled'
@@ -931,7 +938,7 @@ class PortfolioManager:
                     if filled_dt.date() == today:
                         today_orders.append(order)
                 except Exception as e:
-                    self.logger.warning(f"Could not parse filled_at timestamp '{filled_at}' for order {order.get('id')}: {e}")
+                    logger.warning(f"Could not parse filled_at timestamp '{filled_at}' for order {order.get('id')}: {e}")
                     continue # Skip this order if parsing fails
         
         return today_orders
@@ -948,6 +955,12 @@ class PortfolioManager:
         portfolio_state = self.get_portfolio_state()
         
         management_actions = {}
+        
+        # Check if we have sufficient buying power to even consider trading
+        buying_power = portfolio_state.get('buying_power', 0)
+        if buying_power <= 0:
+            logger.warning(f"Position management skipped: Insufficient buying power (${buying_power:.2f})")
+            return {'status': 'skipped', 'reason': 'Insufficient buying power'}
         
         # Only proceed if we have positions
         # portfolio_state['positions'] is now a dict {symbol: position_dict}
@@ -1013,11 +1026,20 @@ class PortfolioManager:
                         options_portfolio_state=self.get_options_portfolio_state() # Get fresh options state
                     )
                 except Exception as e:
-                     self.logger.error(f"Error sizing scale_in decision for {symbol}: {e}", exc_info=True)
+                     logger.error(f"Error sizing scale_in decision for {symbol}: {e}", exc_info=True)
                      continue # Skip execution if sizing fails
                 
-                # Execute if quantity > 0
-                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0:
+                # Only execute if quantity > 0 AND there's no skip_reason
+                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0 and not sized_stock_decision.get('skip_reason'):
+                    # One more check on buying power before execution
+                    if portfolio_state.get('buying_power', 0) <= 0:
+                        logger.warning(f"Cancelling scale_in for {symbol}: No buying power available")
+                        management_actions[symbol] = {
+                            'action': 'skip_scale_in',
+                            'reason': 'No buying power available'
+                        }
+                        continue
+                        
                     # Wrap for Alpaca execution function
                     execution_input = {symbol: sized_stock_decision}
                     result = self.alpaca.execute_trading_decisions(execution_input)
@@ -1026,7 +1048,7 @@ class PortfolioManager:
                         'result': result.get(symbol) # Use .get for safety
                     }
                 elif sized_stock_decision:
-                     self.logger.info(f"Skipping scale_in execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
+                     logger.info(f"Skipping scale_in execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
                     
             elif scale_out:
                 # We're profitable, consider reducing position
@@ -1057,11 +1079,20 @@ class PortfolioManager:
                         options_portfolio_state=self.get_options_portfolio_state() # Get fresh options state
                     )
                 except Exception as e:
-                     self.logger.error(f"Error sizing scale_out decision for {symbol}: {e}", exc_info=True)
+                     logger.error(f"Error sizing scale_out decision for {symbol}: {e}", exc_info=True)
                      continue # Skip execution if sizing fails
                 
-                # Execute if quantity > 0
-                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0:
+                # Only execute if quantity > 0 AND there's no skip_reason
+                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0 and not sized_stock_decision.get('skip_reason'):
+                    # One more check on buying power before execution (even sells/covers require some BP)
+                    if portfolio_state.get('buying_power', 0) <= 0:
+                        logger.warning(f"Cancelling scale_out for {symbol}: No buying power available")
+                        management_actions[symbol] = {
+                            'action': 'skip_scale_out',
+                            'reason': 'No buying power available'
+                        }
+                        continue
+                        
                     # Wrap for Alpaca execution function
                     execution_input = {symbol: sized_stock_decision}
                     result = self.alpaca.execute_trading_decisions(execution_input)
@@ -1070,7 +1101,7 @@ class PortfolioManager:
                         'result': result.get(symbol) # Use .get for safety
                     }
                 elif sized_stock_decision:
-                     self.logger.info(f"Skipping scale_out execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
+                     logger.info(f"Skipping scale_out execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
                     
         return management_actions
     
@@ -1087,6 +1118,12 @@ class PortfolioManager:
         portfolio_state = self.get_portfolio_state()
         
         management_actions = {}
+        
+        # Check if we have sufficient buying power to even consider trading
+        buying_power = portfolio_state.get('buying_power', 0)
+        if buying_power <= 0:
+            logger.warning(f"Stop/target management skipped: Insufficient buying power (${buying_power:.2f})")
+            return {'status': 'skipped', 'reason': 'Insufficient buying power'}
         
         # Only proceed if we have positions
         # portfolio_state['positions'] is now a dict {symbol: position_dict}
@@ -1140,6 +1177,15 @@ class PortfolioManager:
                          (side == 'short' and current_price <= target_price)
             
             if stop_hit:
+                # One more check on buying power before execution
+                if portfolio_state.get('buying_power', 0) <= 0:
+                    logger.warning(f"Cancelling stop loss for {symbol}: No buying power available")
+                    management_actions[symbol] = {
+                        'action': 'skip_stop_loss',
+                        'reason': 'No buying power available'
+                    }
+                    continue
+                
                 # Create stop loss order to exit position
                 action = 'sell' if side == 'long' else 'cover'
                     
@@ -1155,15 +1201,31 @@ class PortfolioManager:
 
                 # Ensure quantity is positive before executing
                 if sized_decisions[symbol]['quantity'] > 0:
-                    result = self.alpaca.execute_trading_decisions(sized_decisions)
-                    management_actions[symbol] = {
-                        'action': 'stop_loss' + ('_trailing' if is_trailing_stop else ''),
-                        'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
-                    }
+                    try:
+                        result = self.alpaca.execute_trading_decisions(sized_decisions)
+                        management_actions[symbol] = {
+                            'action': 'stop_loss' + ('_trailing' if is_trailing_stop else ''),
+                            'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
+                        }
+                    except Exception as e:
+                        logger.error(f"Error executing stop loss for {symbol}: {e}")
+                        management_actions[symbol] = {
+                            'action': 'stop_loss_failed',
+                            'error': str(e)
+                        }
                 else:
                     logger.warning(f"Stop loss for {symbol} resulted in zero quantity after calculation.")
 
             elif target_hit:
+                # One more check on buying power before execution
+                if portfolio_state.get('buying_power', 0) <= 0:
+                    logger.warning(f"Cancelling take profit for {symbol}: No buying power available")
+                    management_actions[symbol] = {
+                        'action': 'skip_take_profit',
+                        'reason': 'No buying power available'
+                    }
+                    continue
+                
                 # Create take profit order to exit position or scale out
                 action = 'sell' if side == 'long' else 'cover'
                 
@@ -1185,11 +1247,18 @@ class PortfolioManager:
 
                 # Ensure quantity is positive before executing
                 if sized_decisions[symbol]['quantity'] > 0:
-                    result = self.alpaca.execute_trading_decisions(sized_decisions)
-                    management_actions[symbol] = {
-                        'action': 'take_profit',
-                        'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
-                    }
+                    try:
+                        result = self.alpaca.execute_trading_decisions(sized_decisions)
+                        management_actions[symbol] = {
+                            'action': 'take_profit',
+                            'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
+                        }
+                    except Exception as e:
+                        logger.error(f"Error executing take profit for {symbol}: {e}")
+                        management_actions[symbol] = {
+                            'action': 'take_profit_failed',
+                            'error': str(e)
+                        }
                 else:
                     logger.warning(f"Take profit for {symbol} resulted in zero quantity after calculation.")
                     
@@ -1428,7 +1497,7 @@ class PortfolioManager:
                 # Make sure we have a valid ticker
                 log_context_ticker = current_decision.get('ticker', '')
                 if not log_context_ticker:
-                    self.logger.warning(f"Risk Filter: Setting action to 'none' due to missing option ticker in single-leg decision.")
+                    logger.warning(f"Risk Filter: Setting action to 'none' due to missing option ticker in single-leg decision.")
                     current_decision['action'] = 'none'
                     current_decision['skip_reason'] = 'Invalid option ticker'
                     filtered_decisions[ticker] = current_decision
@@ -1444,7 +1513,7 @@ class PortfolioManager:
 
             # Check max drawdown threshold (restrict opening new risk)
             if max_drawdown_reached and effective_action in ['open', 'open_spread']:
-                self.logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max drawdown.")
+                logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max drawdown.")
                 current_decision['original_action'] = current_decision.get('action', 'none')
                 current_decision['action'] = 'none'
                 current_decision['skip_reason'] = 'Max drawdown threshold reached'
@@ -1453,7 +1522,7 @@ class PortfolioManager:
 
             # Check max trades per day (restrict opening new risk)
             if max_trades_reached and effective_action in ['open', 'open_spread']:
-                self.logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max trades per day.")
+                logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max trades per day.")
                 current_decision['original_action'] = current_decision.get('action', 'none')
                 current_decision['action'] = 'none'
                 current_decision['skip_reason'] = 'Maximum trades per day reached'
@@ -1475,7 +1544,7 @@ class PortfolioManager:
                         is_day_trade = True
 
                 if is_day_trade and not day_trades_available:
-                    self.logger.warning(f"Risk Filter: Setting {log_context_ticker} {current_decision.get('action', 'none')} to 'none' due to no day trades available.")
+                    logger.warning(f"Risk Filter: Setting {log_context_ticker} {current_decision.get('action', 'none')} to 'none' due to no day trades available.")
                     current_decision['original_action'] = current_decision.get('action', 'none')
                     current_decision['action'] = 'none'
                     current_decision['skip_reason'] = 'No day trades available'
@@ -1484,7 +1553,7 @@ class PortfolioManager:
 
             # Check options allocation limits (only for OPENING actions)
             if effective_action in ['open', 'open_spread'] and options_market_value >= max_options_allocation_value:
-                self.logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max options allocation reached ({options_market_value:.2f} >= {max_options_allocation_value:.2f}).")
+                logger.warning(f"Risk Filter: Setting {log_context_ticker} action to 'none' due to max options allocation reached ({options_market_value:.2f} >= {max_options_allocation_value:.2f}).")
                 current_decision['original_action'] = current_decision.get('action', 'none')
                 current_decision['action'] = 'none'
                 current_decision['skip_reason'] = 'Maximum options allocation reached'
@@ -1506,8 +1575,15 @@ class PortfolioManager:
         # Update portfolio state
         self.update_portfolio_cache(force=True)
         options_portfolio_state = self.get_options_portfolio_state()
+        portfolio_state = self.get_portfolio_state()
 
         management_actions = {}
+
+        # Check if we have sufficient buying power to even consider trading
+        buying_power = portfolio_state.get('buying_power', 0)
+        if buying_power <= 0:
+            logger.warning(f"Options position management skipped: Insufficient buying power (${buying_power:.2f})")
+            return {'status': 'skipped', 'reason': 'Insufficient buying power'}
 
         # Only proceed if we have options positions
         if not options_portfolio_state.get('positions'): # Check key exists
@@ -1534,15 +1610,31 @@ class PortfolioManager:
                     'reasoning': f"Automatically closing position with {days_to_expiration:.1f} days to expiration"
                 }
 
-                # Execute the decision
-                from src.integrations import AlpacaOptionsTrader
-                options_trader = AlpacaOptionsTrader(paper=True)
-                result = options_trader.execute_option_decision(decision)
+                # One more check on buying power before execution (even closes require some BP)
+                if portfolio_state.get('buying_power', 0) <= 0:
+                    logger.warning(f"Cancelling options close for {symbol}: No buying power available")
+                    management_actions[symbol] = {
+                        'action': 'skip_close',
+                        'reason': 'No buying power available'
+                    }
+                    continue
 
-                management_actions[symbol] = {
-                    'action': 'close_expiring',
-                    'result': result
-                }
+                # Execute the decision
+                try:
+                    from src.integrations import AlpacaOptionsTrader
+                    options_trader = AlpacaOptionsTrader(paper=True)
+                    result = options_trader.execute_option_decision(decision)
+
+                    management_actions[symbol] = {
+                        'action': 'close_expiring',
+                        'result': result
+                    }
+                except Exception as e:
+                    logger.error(f"Error closing expiring option {symbol}: {e}")
+                    management_actions[symbol] = {
+                        'action': 'close_expiring_failed',
+                        'error': str(e)
+                    }
                 continue # Don't check other conditions if closing for expiration
 
             # Check for stop loss / take profit conditions
@@ -1576,15 +1668,31 @@ class PortfolioManager:
                     'reasoning': f"Stop loss triggered at {profit_loss_pct:.1f}% (Threshold: {stop_loss_threshold:.1f}%)"
                 }
 
-                # Execute the decision
-                from src.integrations import AlpacaOptionsTrader
-                options_trader = AlpacaOptionsTrader(paper=True)
-                result = options_trader.execute_option_decision(decision)
+                # One more check on buying power before execution
+                if portfolio_state.get('buying_power', 0) <= 0:
+                    logger.warning(f"Cancelling options stop loss for {symbol}: No buying power available")
+                    management_actions[symbol] = {
+                        'action': 'skip_stop_loss',
+                        'reason': 'No buying power available'
+                    }
+                    continue
 
-                management_actions[symbol] = {
-                    'action': 'stop_loss',
-                    'result': result
-                }
+                # Execute the decision
+                try:
+                    from src.integrations import AlpacaOptionsTrader
+                    options_trader = AlpacaOptionsTrader(paper=True)
+                    result = options_trader.execute_option_decision(decision)
+
+                    management_actions[symbol] = {
+                        'action': 'stop_loss',
+                        'result': result
+                    }
+                except Exception as e:
+                    logger.error(f"Error executing stop loss for option {symbol}: {e}")
+                    management_actions[symbol] = {
+                        'action': 'stop_loss_failed',
+                        'error': str(e)
+                    }
                 continue # Exit after stop loss
 
             # Check take profit
@@ -1604,15 +1712,31 @@ class PortfolioManager:
                     'reasoning': f"Take profit triggered at {profit_loss_pct:.1f}% (Threshold: {take_profit_threshold:.1f}%)"
                 }
 
-                # Execute the decision
-                from src.integrations import AlpacaOptionsTrader
-                options_trader = AlpacaOptionsTrader(paper=True)
-                result = options_trader.execute_option_decision(decision)
+                # One more check on buying power before execution
+                if portfolio_state.get('buying_power', 0) <= 0:
+                    logger.warning(f"Cancelling options take profit for {symbol}: No buying power available")
+                    management_actions[symbol] = {
+                        'action': 'skip_take_profit',
+                        'reason': 'No buying power available'
+                    }
+                    continue
 
-                management_actions[symbol] = {
-                    'action': 'take_profit',
-                    'result': result
-                }
+                # Execute the decision
+                try:
+                    from src.integrations import AlpacaOptionsTrader
+                    options_trader = AlpacaOptionsTrader(paper=True)
+                    result = options_trader.execute_option_decision(decision)
+
+                    management_actions[symbol] = {
+                        'action': 'take_profit',
+                        'result': result
+                    }
+                except Exception as e:
+                    logger.error(f"Error executing take profit for option {symbol}: {e}")
+                    management_actions[symbol] = {
+                        'action': 'take_profit_failed',
+                        'error': str(e)
+                    }
 
         return management_actions
     # --- End: Options Portfolio Methods ---
@@ -1898,3 +2022,79 @@ class PortfolioManager:
              _, option_result = self.execute_combined_decision(stock_decision=None, option_decision=decision_with_ticker)
              results[option_ticker] = option_result if option_result else {'status': 'error', 'message': 'Execution failed', 'order': None}
         return results
+
+    def execute_batch_decisions(
+        self,
+        stock_decisions: Dict[str, Dict[str, Any]],
+        option_decisions: Dict[str, Dict[str, Any]]
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        """
+        Sizes and executes a batch of stock and option decisions, optimizing for total
+        portfolio resource allocation to maximize successful execution of all trades.
+        
+        Args:
+            stock_decisions: Dict mapping tickers to stock decision dictionaries.
+            option_decisions: Dict mapping option tickers to option decision dictionaries.
+            
+        Returns:
+            Tuple of execution results for stocks and options.
+        """
+        logger.info(f"Executing batch of {len(stock_decisions)} stock and {len(option_decisions)} option decisions")
+        
+        # Get current portfolio state for sizing
+        portfolio_state = self.get_portfolio_state()
+        options_portfolio_state = self.get_options_portfolio_state()
+        
+        # Use the batch sizing method to determine quantities
+        sized_stock_decisions, sized_option_decisions = self.portfolio_sizer_agent.calculate_batch_sizes(
+            stock_decisions=stock_decisions,
+            option_decisions=option_decisions,
+            portfolio_state=portfolio_state,
+            options_portfolio_state=options_portfolio_state
+        )
+        
+        # Track results
+        stock_execution_results = {}
+        option_execution_results = {}
+        
+        # Execute all valid stock decisions
+        stock_decisions_to_execute = {}
+        for ticker, decision in sized_stock_decisions.items():
+            if decision.get('quantity', 0) > 0 and not decision.get('skip_reason'):
+                stock_decisions_to_execute[ticker] = decision
+                
+        if stock_decisions_to_execute:
+            logger.info(f"Executing {len(stock_decisions_to_execute)} stock decisions")
+            stock_execution_results = self.alpaca.execute_trading_decisions(stock_decisions_to_execute)
+        else:
+            logger.info("No stock decisions to execute after sizing")
+            
+        # Execute all valid option decisions
+        if sized_option_decisions:
+            # Import here to avoid circular imports
+            from src.integrations import AlpacaOptionsTrader
+            options_trader = AlpacaOptionsTrader(paper=True)
+            
+            options_to_execute = {}
+            for ticker, decision in sized_option_decisions.items():
+                if decision.get('quantity', 0) > 0 and not decision.get('skip_reason'):
+                    options_to_execute[ticker] = decision
+            
+            if options_to_execute:
+                logger.info(f"Executing {len(options_to_execute)} option decisions")
+                try:
+                    option_execution_results = options_trader.execute_options_decisions(options_to_execute)
+                except Exception as e:
+                    logger.error(f"Error executing option trades: {e}")
+                    # Create error results for each option
+                    for ticker in options_to_execute:
+                        option_execution_results[ticker] = {
+                            'status': 'error',
+                            'error': str(e)
+                        }
+            else:
+                logger.info("No option decisions to execute after sizing")
+        
+        # Return results
+        logger.info(f"Batch execution complete. Executed {len(stock_execution_results)} stock trades and {len(option_execution_results)} option trades")
+        return stock_execution_results, option_execution_results

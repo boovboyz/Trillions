@@ -395,139 +395,135 @@ class TradingManager:
             else:
                 logger.info("Options trading is disabled. Skipping options analysis.")
 
-            # Execute combined decisions (stock & options) via PortfolioManager
-            stock_execution_results = {}
-            option_execution_results = {}
-            combined_execution_results = {} # For overall summary
-
-            # We need to iterate through all involved tickers (from stock and options decisions)
-            all_tickers = set(stock_decisions.keys())
-
-            # Build a map of underlying tickers to option decisions for multi-leg strategies
-            underlying_to_option_map = {}
-            for option_key, option_decision in options_decisions.items():
-                # Check if this is a multi-leg strategy
-                if 'legs' in option_decision and isinstance(option_decision['legs'], list):
-                    # Use the underlying ticker as key
-                    underlying = option_decision.get('underlying_ticker')
-                    if underlying:
-                        underlying_to_option_map[underlying] = option_decision
-                        # Add the underlying to the all_tickers set
-                        all_tickers.add(underlying)
-                else:
-                    # For single-leg options, use the option ticker
-                    all_tickers.add(option_key)
-
-            # For normal options (not multi-leg), just add them directly
-            for option_key in options_decisions.keys():
-                if option_key not in underlying_to_option_map:
-                    all_tickers.add(option_key)
-
-            if not all_tickers:
-                 logger.info("No stock or option decisions generated. Nothing to execute.")
+            # --- BATCH EXECUTION UPDATE ---
+            # Instead of processing trades one by one, batch them for combined execution
+            if not stock_decisions and not options_decisions:
+                logger.info("No stock or option decisions generated. Nothing to execute.")
+                combined_execution_results = {}
             else:
-                 logger.info(f"Processing combined execution for tickers: {list(all_tickers)}")
-                 for ticker in all_tickers:
-                     # Get the specific stock/option decision for this ticker (or None)
-                     current_stock_decision = stock_decisions.get(ticker)
-                     
-                     # First check if this ticker is an underlying for a multi-leg option strategy
-                     current_option_decision = underlying_to_option_map.get(ticker)
-                     
-                     # If not found in multi-leg map, check regular options decisions
-                     if not current_option_decision:
-                         current_option_decision = options_decisions.get(ticker)
-
-                     # Prepare decisions with the ticker key added *inside* the dictionary
-                     stock_decision_for_exec = None
-                     if current_stock_decision:
-                         stock_decision_for_exec = current_stock_decision.copy()
-                         stock_decision_for_exec['ticker'] = ticker # Add ticker key
-
-                     option_decision_for_exec = None
-                     if current_option_decision:
-                         option_decision_for_exec = current_option_decision.copy()
-                         # No need to add ticker for options - they already have it
-
-                     if not stock_decision_for_exec and not option_decision_for_exec:
-                          continue # Should not happen if ticker came from the sets
-                          
-                     logger.info(f"Executing combined decision for ticker: {ticker}")
-                     stock_exec, option_exec = self.portfolio_manager.execute_combined_decision(
-                         stock_decision=stock_decision_for_exec,
-                         option_decision=option_decision_for_exec
-                     )
-                     
-                     # Store results keyed by ticker for summary
-                     if stock_exec:
-                          stock_execution_results[ticker] = stock_exec
-                          combined_execution_results[ticker] = stock_exec # Use stock result if available
-                     
-                     # --- MODIFIED: Check if option_exec is not None before processing ---
-                     if option_exec:
-                          # For multi-leg options, use the underlying ticker as the key
-                          # Check if 'order' exists and is a list (indicating multi-leg)
-                          order_info = option_exec.get('order')
-                          if isinstance(order_info, list):
-                              # This is a multi-leg option
-                              option_execution_results[ticker] = option_exec
-                          elif isinstance(order_info, dict):
-                              # For single-leg options, use the option ticker
-                              option_key = order_info.get('symbol', ticker) # Safely get symbol
-                              option_execution_results[option_key] = option_exec
-                          # else: Handle cases where order_info is None or unexpected type? Log maybe?
-
-                          # If only option trade, use its result for combined summary
-                          if ticker not in combined_execution_results:
-                              combined_execution_results[ticker] = option_exec
-                     # --- END MODIFICATION ---
-
-                 # Print Execution Summary Table using combined results
-                 print_execution_summary(combined_execution_results)
-                 # --- ADDED: Print the dedicated Options Execution Summary --- 
-                 if option_execution_results:
-                     # Use the dedicated function for options execution results
-                     from src.utils.display import print_options_execution_summary # Ensure import
-                     print_options_execution_summary(option_execution_results)
-                     
-                 logger.info("Combined trading decisions executed.")
-                 logger.info(f"Stock Executions: {json.dumps(stock_execution_results, default=json_serial)}")
-                 logger.info(f"Option Executions: {json.dumps(option_execution_results, default=json_serial)}")
+                # Prepare the stock and option decisions for batch processing
+                stock_decisions_for_batch = {}
+                for ticker, decision in stock_decisions.items():
+                    # Add ticker inside the decision object (needed for batch processing)
+                    decision_with_ticker = decision.copy()
+                    decision_with_ticker['ticker'] = ticker
+                    stock_decisions_for_batch[ticker] = decision_with_ticker
+                
+                # Prepare options decisions, handling multi-leg strategies
+                options_decisions_for_batch = {}
+                for option_key, option_decision in options_decisions.items():
+                    # For multi-leg strategies, ensure the underlying ticker is added
+                    if 'legs' in option_decision and isinstance(option_decision['legs'], list):
+                        underlying_ticker = option_decision.get('underlying_ticker')
+                        if underlying_ticker:
+                            # Make sure the decision contains the underlying ticker
+                            option_decision_copy = option_decision.copy()
+                            option_decision_copy['underlying_ticker'] = underlying_ticker
+                            options_decisions_for_batch[option_key] = option_decision_copy
+                    else:
+                        # Single-leg option
+                        options_decisions_for_batch[option_key] = option_decision.copy()
+                
+                # Execute all decisions in a batch
+                logger.info(f"Executing batch of {len(stock_decisions_for_batch)} stock decisions and {len(options_decisions_for_batch)} option decisions")
+                stock_execution_results, option_execution_results = self.portfolio_manager.execute_batch_decisions(
+                    stock_decisions=stock_decisions_for_batch,
+                    option_decisions=options_decisions_for_batch
+                )
+                
+                # Combine results for display (similar to original code)
+                combined_execution_results = {}
+                
+                # Add stock results
+                for ticker, result in stock_execution_results.items():
+                    combined_execution_results[ticker] = result
+                
+                # Add option results
+                for option_key, result in option_execution_results.items():
+                    # Check if this is a multi-leg option with an underlying
+                    option_decision = options_decisions_for_batch.get(option_key, {})
+                    if 'underlying_ticker' in option_decision:
+                        underlying = option_decision['underlying_ticker']
+                        # Only add if not already in results from stocks
+                        if underlying not in combined_execution_results:
+                            combined_execution_results[underlying] = result
+                    else:
+                        # Single-leg option
+                        combined_execution_results[option_key] = result
+                
+                # Print Execution Summary Table using combined results
+                print_execution_summary(combined_execution_results)
+                
+                # Print the dedicated Options Execution Summary if needed
+                if option_execution_results:
+                    from src.utils.display import print_options_execution_summary
+                    print_options_execution_summary(option_execution_results)
+                
+                logger.info("Batch execution complete.")
+                logger.info(f"Stock Executions: {json.dumps(stock_execution_results, default=json_serial)}")
+                logger.info(f"Option Executions: {json.dumps(option_execution_results, default=json_serial)}")
+            # --- END BATCH EXECUTION UPDATE ---
 
             # Wait for orders to potentially fill
             sleep_duration = 30
             logger.info(f"Waiting {sleep_duration} seconds for orders to fill...")
             time.sleep(sleep_duration)
             
-            # Force refresh portfolio cache
-            logger.info("Forcing portfolio cache refresh...")
-            self.portfolio_manager.update_portfolio_cache(force=True)
-            
-            # Get final portfolio state
-            final_portfolio_state = self.portfolio_manager.get_portfolio_state()
-            logger.info("Final portfolio state retrieved.")
-            print_portfolio_status(final_portfolio_state)
-            
-            # Store results
-            results = {
-                "status": "completed",
-                "timestamp": datetime.now().isoformat(),
-                "portfolio_before": initial_portfolio_state, # Use initial state
-                "ai_analysis": ai_result, # Includes stock decisions & maybe options decisions
-                "stock_execution_results": stock_execution_results,
-                "option_execution_results": option_execution_results,
-                "portfolio_after": final_portfolio_state
-            }
-            
-            self._save_results(results)
-            return results
-            
+            # Update portfolio state and print current status
+            try:
+                final_portfolio_state = self.portfolio_manager.get_portfolio_state()
+                print_portfolio_status(final_portfolio_state)
+                
+                # Calculate performance
+                initial_value = float(initial_portfolio_state['portfolio_value'])
+                final_value = float(final_portfolio_state['portfolio_value'])
+                performance = {
+                    'initial_value': initial_value,
+                    'final_value': final_value,
+                    'change': final_value - initial_value,
+                    'change_pct': ((final_value / initial_value) - 1) * 100 if initial_value > 0 else 0
+                }
+                
+                # Save results
+                result = {
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'completed',
+                    'tickers': self.tickers,
+                    'initial_portfolio': initial_portfolio_state,
+                    'final_portfolio': final_portfolio_state,
+                    'stock_decisions': stock_decisions,
+                    'options_decisions': options_decisions, 
+                    'execution_results': combined_execution_results,
+                    'performance': performance
+                }
+                
+                self._save_results(result)
+                return result
+                
+            except Exception as e:
+                logger.error("Error getting final portfolio state: %s", str(e))
+                traceback.print_exc()
+                
+                # Still return partial results
+                return {
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'partial',
+                    'tickers': self.tickers,
+                    'initial_portfolio': initial_portfolio_state,
+                    'stock_decisions': stock_decisions,
+                    'options_decisions': options_decisions,
+                    'execution_results': combined_execution_results,
+                    'error': str(e)
+                }
+                
         except Exception as e:
-            logger.exception("Error in trading cycle: %s", str(e))
+            logger.error("Error in trading cycle: %s", str(e))
+            traceback.print_exc()
+            
             return {
-                "status": "error",
-                "reason": str(e),
-                "timestamp": datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'status': 'error',
+                'error': str(e)
             }
     
     def run_position_management(self):

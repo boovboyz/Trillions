@@ -4,7 +4,7 @@ considering portfolio state, risk parameters, and the combined nature of the tra
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import math
 
 # Assuming these integrations exist and provide necessary methods
@@ -39,6 +39,629 @@ class PortfolioSizerAgent:
         self.portfolio_cache = portfolio_cache
         self.logger = logging.getLogger(__name__)
         self.logger.info("PortfolioSizerAgent initialized.")
+
+    def calculate_batch_sizes(
+        self,
+        stock_decisions: Dict[str, Dict[str, Any]],
+        option_decisions: Dict[str, Dict[str, Any]],
+        portfolio_state: PortfolioState,
+        options_portfolio_state: OptionsPortfolioState
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        """
+        Holistically calculates sizes for a batch of stock and option decisions,
+        considering the combined impact on portfolio resources (cash, buying power).
+        
+        Args:
+            stock_decisions: Dict mapping tickers to stock decision dicts.
+            option_decisions: Dict mapping option tickers/ids to option decision dicts.
+            portfolio_state: Current state of the stock portfolio.
+            options_portfolio_state: Current state of the options portfolio.
+            
+        Returns:
+            Tuple of (sized_stock_decisions, sized_option_decisions) with quantities set.
+        """
+        self.logger.info(f"Calculating batch sizes for {len(stock_decisions)} stock decisions and {len(option_decisions)} option decisions")
+        
+        # Create copies to avoid modifying the originals
+        sized_stock_decisions = {ticker: decision.copy() for ticker, decision in stock_decisions.items()}
+        sized_option_decisions = {ticker: decision.copy() for ticker, decision in option_decisions.items()}
+        
+        # Initialize quantities to 0 and skip_reason to None for all decisions
+        for ticker, decision in sized_stock_decisions.items():
+            decision['quantity'] = 0
+            decision['skip_reason'] = None
+            
+        for ticker, decision in sized_option_decisions.items():
+            decision['quantity'] = 0
+            decision['skip_reason'] = None
+        
+        # --- Extract Portfolio Resources ---
+        portfolio_value = portfolio_state.get('portfolio_value', 0)
+        initial_cash = portfolio_state.get('cash', 0)
+        initial_buying_power = portfolio_state.get('buying_power', 0)
+        stock_positions = portfolio_state.get('positions', {})
+        options_positions = options_portfolio_state.get('positions', {})
+        
+        if portfolio_value <= 0:
+            self.logger.warning("Portfolio value is zero or negative. Cannot size positions.")
+            self._mark_all_as_skipped(sized_stock_decisions, sized_option_decisions, "Zero or negative portfolio value")
+            return sized_stock_decisions, sized_option_decisions
+        
+        # Get pending orders to account for uncommitted resources
+        pending_quantities = self._get_pending_stock_quantities()
+        
+        # --- Group and Organize Decisions ---
+        # 1. Find covered call relationships and other dependencies
+        # 2. Group multi-leg option strategies 
+        # 3. Identify cash-secured puts that need special cash handling
+        
+        # Covered Call dependencies - map option ticker to underlying stock ticker
+        covered_call_dependencies = {}
+        # Map of underlying ticker to list of option decisions that need underlying shares
+        underlying_dependencies = {}
+        # Cash-secured puts that need special cash handling
+        cash_secured_puts = []
+        # Multi-leg strategies
+        spread_strategies = []
+        
+        # Process option decisions to identify dependencies
+        for option_ticker, decision in sized_option_decisions.items():
+            # Check for covered call strategy
+            if decision.get('strategy') == 'covered_call' and decision.get('action') == 'sell':
+                underlying_ticker = decision.get('underlying_ticker')
+                if underlying_ticker:
+                    covered_call_dependencies[option_ticker] = underlying_ticker
+                    if underlying_ticker not in underlying_dependencies:
+                        underlying_dependencies[underlying_ticker] = []
+                    underlying_dependencies[underlying_ticker].append(option_ticker)
+            
+            # Check for cash-secured puts
+            if (decision.get('option_type') == 'put' and 
+                decision.get('action') == 'sell' and 
+                not decision.get('strategy', '').endswith('spread')):  # Not part of a spread
+                cash_secured_puts.append(option_ticker)
+            
+            # Check for multi-leg strategies
+            if 'legs' in decision and isinstance(decision['legs'], list):
+                spread_strategies.append(option_ticker)
+        
+        # --- Calculate Initial Target Quantities ---
+        # Maps ticker -> required cash/buying power if executed at target quantity
+        stock_resource_requirements = {}
+        option_resource_requirements = {}
+        
+        # Process stock decisions first to calculate target quantities
+        for ticker, decision in sized_stock_decisions.items():
+            action = decision.get('action', 'hold').lower()
+            if action == 'hold':
+                continue
+                
+            # Get current price
+            current_price = self._get_stock_price(ticker)
+            if current_price is None:
+                decision['skip_reason'] = f"Could not get current price for {ticker}"
+                continue
+                
+            # Calculate target quantity based on risk and confidence
+            confidence = decision.get('confidence', 50.0)
+            target_quantity = self._calculate_target_stock_quantity(
+                ticker, action, confidence, current_price, portfolio_value
+            )
+            
+            # Store the target quantity for later constraint application
+            decision['_target_quantity'] = target_quantity
+            
+            # Calculate resource requirements
+            if action == 'buy':
+                stock_resource_requirements[ticker] = {
+                    'cash_required': current_price * target_quantity,
+                    'buying_power_required': current_price * target_quantity,
+                    'confidence': confidence,
+                    'price': current_price,
+                    'action': action
+                }
+            elif action == 'short':
+                stock_resource_requirements[ticker] = {
+                    'cash_required': 0,  # No direct cash required
+                    'buying_power_required': current_price * target_quantity * 1.5,  # Margin requirement
+                    'confidence': confidence,
+                    'price': current_price,
+                    'action': action
+                }
+            else:  # sell or cover - these free up resources
+                stock_resource_requirements[ticker] = {
+                    'cash_required': 0,
+                    'buying_power_required': 0,
+                    'confidence': confidence,
+                    'price': current_price,
+                    'action': action,
+                    'frees_up_cash': action == 'sell',  # Selling frees up cash
+                    'frees_up_buying_power': True  # Both selling and covering free up buying power
+                }
+        
+        # Process option decisions to calculate target quantities
+        for option_ticker, decision in sized_option_decisions.items():
+            # Skip multi-leg strategies for now, handle them separately below
+            if option_ticker in spread_strategies:
+                continue
+                
+            action = decision.get('action', 'none').lower()
+            if action in ['none', 'hold']:
+                continue
+                
+            # Get current price
+            current_price = self._get_option_price(option_ticker, decision.get('limit_price'), options_positions)
+            if current_price is None:
+                decision['skip_reason'] = f"Could not determine current price for {option_ticker}"
+                continue
+                
+            # Calculate target quantity
+            confidence = decision.get('confidence', 50.0)
+            
+            if action == 'close':
+                # For close actions, use the existing position quantity
+                existing_position = options_positions.get(option_ticker)
+                target_quantity = abs(int(existing_position['qty'])) if existing_position else 0
+            else:
+                # For opening positions, calculate target based on risk
+                target_quantity = self._calculate_target_option_quantity(
+                    option_ticker, action, confidence, current_price, portfolio_value
+                )
+            
+            # Store the target quantity for later constraint application
+            decision['_target_quantity'] = target_quantity
+            
+            # Calculate resource requirements (100 shares per contract)
+            contract_value = current_price * 100
+            
+            if action == 'buy':
+                option_resource_requirements[option_ticker] = {
+                    'cash_required': contract_value * target_quantity,
+                    'buying_power_required': contract_value * target_quantity,
+                    'confidence': confidence,
+                    'price': current_price,
+                    'action': action
+                }
+            elif action == 'sell':
+                # For cash-secured puts, reserve the full strike value
+                if option_ticker in cash_secured_puts:
+                    strike_price = decision.get('strike_price', 0)
+                    cash_required = strike_price * 100 * target_quantity
+                else:
+                    cash_required = 0  # No direct cash required for covered calls
+                
+                option_resource_requirements[option_ticker] = {
+                    'cash_required': cash_required,
+                    'buying_power_required': contract_value * target_quantity * 0.2,  # Approximate margin requirement
+                    'confidence': confidence,
+                    'price': current_price,
+                    'action': action
+                }
+            elif action == 'close':
+                option_resource_requirements[option_ticker] = {
+                    'cash_required': 0,
+                    'buying_power_required': 0,
+                    'confidence': confidence,
+                    'price': current_price,
+                    'action': action,
+                    'frees_up_cash': False,  # Closing a short position doesn't free up cash
+                    'frees_up_buying_power': True  # But does free up buying power
+                }
+        
+        # Calculate resource requirements for multi-leg strategies
+        for spread_ticker in spread_strategies:
+            decision = sized_option_decisions[spread_ticker]
+            
+            # For spreads, calculate the net debit/credit and buying power requirement
+            # based on the specific strategy
+            strategy_type = decision.get('strategy', '').lower()
+            
+            # Let's use the existing spread calculation method that already handles this logic
+            target_quantity = self._calculate_multi_leg_option_quantity(
+                decision, portfolio_value, initial_cash, initial_buying_power, initial_cash
+            )
+            
+            decision['_target_quantity'] = target_quantity
+            
+            # For debit spreads (like bull call spreads), we need cash
+            # For credit spreads, we need buying power for margin
+            is_debit_spread = strategy_type in ['bull_call_spread', 'bear_put_spread']
+            
+            # Get the net limit price if available
+            net_price = decision.get('net_limit_price')
+            
+            # If not available, calculate from legs
+            if net_price is None:
+                net_price = 0
+                for leg in decision.get('legs', []):
+                    leg_action = leg.get('action', '').lower()
+                    leg_price = leg.get('limit_price', 0)
+                    
+                    if leg_action == 'buy':
+                        net_price += leg_price
+                    elif leg_action == 'sell':
+                        net_price -= leg_price
+            
+            # Calculate the resource requirements
+            if is_debit_spread:
+                # Debit spread - we pay net_price * 100 * quantity
+                option_resource_requirements[spread_ticker] = {
+                    'cash_required': max(0, net_price * 100 * target_quantity),
+                    'buying_power_required': max(0, net_price * 100 * target_quantity),
+                    'confidence': decision.get('confidence', 50.0),
+                    'price': net_price,
+                    'action': 'spread',
+                    'is_debit_spread': True
+                }
+            else:
+                # Credit spread - we receive the credit but need margin
+                # For put credit spreads, margin is typically the difference in strikes minus credit
+                # For call credit spreads, similar calculation
+                max_risk = 0
+                if strategy_type == 'bull_put_spread' or strategy_type == 'bear_call_spread':
+                    # Find the width between strikes
+                    strikes = [leg.get('strike_price', 0) for leg in decision.get('legs', [])]
+                    if len(strikes) >= 2:
+                        width = abs(max(strikes) - min(strikes))
+                        max_risk = width * 100 * target_quantity
+                
+                option_resource_requirements[spread_ticker] = {
+                    'cash_required': 0,  # No direct cash required, we receive a credit
+                    'buying_power_required': max_risk,
+                    'confidence': decision.get('confidence', 50.0),
+                    'price': abs(net_price),
+                    'action': 'spread',
+                    'is_debit_spread': False
+                }
+        
+        # --- Estimate Total Resource Requirements and Check Constraints ---
+        total_cash_required = sum(req['cash_required'] for req in stock_resource_requirements.values())
+        total_cash_required += sum(req['cash_required'] for req in option_resource_requirements.values())
+        
+        total_buying_power_required = sum(req['buying_power_required'] for req in stock_resource_requirements.values())
+        total_buying_power_required += sum(req['buying_power_required'] for req in option_resource_requirements.values())
+        
+        # Calculate cash reserve
+        cash_reserve_pct = self.config.get('cash_reserve_pct', 0.1)
+        cash_reserve = portfolio_value * cash_reserve_pct
+        available_cash = initial_cash - cash_reserve
+        
+        self.logger.info(f"Resource requirements - Cash: ${total_cash_required:.2f}, BP: ${total_buying_power_required:.2f}")
+        self.logger.info(f"Available resources - Cash: ${available_cash:.2f}, BP: ${initial_buying_power:.2f}")
+        
+        # --- Prioritize and Allocate Resources ---
+        # If we need more resources than available, prioritize trades
+        if total_cash_required > available_cash or total_buying_power_required > initial_buying_power:
+            self.logger.info("Resource constraints detected. Prioritizing trades...")
+            
+            # Combine all resource requirements for prioritization
+            all_requirements = {}
+            
+            # Add stock requirements
+            for ticker, req in stock_resource_requirements.items():
+                all_requirements[f"stock_{ticker}"] = {
+                    **req,
+                    'type': 'stock',
+                    'ticker': ticker
+                }
+                
+            # Add option requirements, handling dependencies
+            for ticker, req in option_resource_requirements.items():
+                # Adjust priority for covered calls to ensure they're processed after underlying stock
+                priority_adjustment = 0
+                if ticker in covered_call_dependencies:
+                    # Lower priority (will be processed after stock)
+                    priority_adjustment = -10
+                
+                all_requirements[f"option_{ticker}"] = {
+                    **req,
+                    'type': 'option',
+                    'ticker': ticker,
+                    'priority_adjustment': priority_adjustment
+                }
+            
+            # Sort by priority (confidence + priority_adjustment)
+            prioritized_requirements = sorted(
+                all_requirements.items(),
+                key=lambda x: (x[1].get('confidence', 0) + x[1].get('priority_adjustment', 0)),
+                reverse=True  # Higher confidence first
+            )
+            
+            # Virtual resources for allocation
+            remaining_cash = available_cash
+            remaining_buying_power = initial_buying_power
+            
+            # Allocate resources based on priority
+            for req_id, req in prioritized_requirements:
+                req_type = req['type']
+                ticker = req['ticker']
+                action = req['action']
+                
+                # Skip sell/cover/close actions since they don't consume initial resources
+                if action in ['sell', 'cover', 'close']:
+                    continue
+                
+                if req_type == 'stock':
+                    decision = sized_stock_decisions[ticker]
+                    target_quantity = decision.get('_target_quantity', 0)
+                    
+                    if action == 'buy':
+                        # Check if we have enough cash
+                        cash_needed = req['price'] * target_quantity
+                        if cash_needed > remaining_cash:
+                            # Scale down quantity
+                            adjusted_quantity = int(remaining_cash / req['price'])
+                            self.logger.info(f"Scaling down {ticker} buy from {target_quantity} to {adjusted_quantity} due to cash constraints")
+                            decision['_adjusted_quantity'] = adjusted_quantity
+                            if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient cash for stock buy"
+                            remaining_cash -= req['price'] * adjusted_quantity
+                            remaining_buying_power -= req['price'] * adjusted_quantity
+                        else:
+                            # We can fulfill the entire target
+                            decision['_adjusted_quantity'] = target_quantity
+                            remaining_cash -= cash_needed
+                            remaining_buying_power -= cash_needed
+                    
+                    elif action == 'short':
+                        # Check if we have enough buying power
+                        bp_needed = req['buying_power_required']
+                        if bp_needed > remaining_buying_power:
+                            # Scale down quantity
+                            adjusted_quantity = int(remaining_buying_power / (req['price'] * 1.5))
+                            self.logger.info(f"Scaling down {ticker} short from {target_quantity} to {adjusted_quantity} due to buying power constraints")
+                            decision['_adjusted_quantity'] = adjusted_quantity
+                            if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient buying power for short"
+                            remaining_buying_power -= req['price'] * adjusted_quantity * 1.5
+                        else:
+                            # We can fulfill the entire target
+                            decision['_adjusted_quantity'] = target_quantity
+                            remaining_buying_power -= bp_needed
+                
+                elif req_type == 'option':
+                    decision = sized_option_decisions[ticker]
+                    target_quantity = decision.get('_target_quantity', 0)
+                    
+                    if action == 'buy':
+                        # Check if we have enough cash
+                        cash_needed = req['price'] * 100 * target_quantity
+                        if cash_needed > remaining_cash:
+                            # Scale down quantity
+                            adjusted_quantity = int(remaining_cash / (req['price'] * 100))
+                            self.logger.info(f"Scaling down {ticker} option buy from {target_quantity} to {adjusted_quantity} due to cash constraints")
+                            decision['_adjusted_quantity'] = adjusted_quantity
+                            if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient cash for option buy"
+                            remaining_cash -= req['price'] * 100 * adjusted_quantity
+                            remaining_buying_power -= req['price'] * 100 * adjusted_quantity
+                        else:
+                            # We can fulfill the entire target
+                            decision['_adjusted_quantity'] = target_quantity
+                            remaining_cash -= cash_needed
+                            remaining_buying_power -= cash_needed
+                    
+                    elif action == 'sell':
+                        if ticker in cash_secured_puts:
+                            # For cash-secured puts, check cash constraints
+                            strike_price = decision.get('strike_price', 0)
+                            cash_needed = strike_price * 100 * target_quantity
+                            if cash_needed > remaining_cash:
+                                # Scale down quantity
+                                adjusted_quantity = int(remaining_cash / (strike_price * 100))
+                                self.logger.info(f"Scaling down {ticker} CSP from {target_quantity} to {adjusted_quantity} due to cash constraints")
+                                decision['_adjusted_quantity'] = adjusted_quantity
+                                if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient cash for CSP"
+                                remaining_cash -= strike_price * 100 * adjusted_quantity
+                            else:
+                                # We can fulfill the entire target
+                                decision['_adjusted_quantity'] = target_quantity
+                                remaining_cash -= cash_needed
+                        else:
+                            # For other sells (like covered calls), check buying power
+                            bp_needed = req['buying_power_required']
+                            if bp_needed > remaining_buying_power:
+                                # Scale down quantity
+                                adjusted_quantity = int(remaining_buying_power / (req['price'] * 100 * 0.2))
+                                self.logger.info(f"Scaling down {ticker} option sell from {target_quantity} to {adjusted_quantity} due to buying power constraints")
+                                decision['_adjusted_quantity'] = adjusted_quantity
+                                if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient buying power for option sell"
+                                remaining_buying_power -= req['price'] * 100 * 0.2 * adjusted_quantity
+                            else:
+                                # We can fulfill the entire target
+                                decision['_adjusted_quantity'] = target_quantity
+                                remaining_buying_power -= bp_needed
+                    
+                    elif action == 'spread':
+                        if req.get('is_debit_spread', False):
+                            # Debit spread - check cash AND buying power
+                            cash_needed = req['cash_required']
+                            bp_needed = req['buying_power_required'] # Get required BP
+                            
+                            # Check constraints
+                            if cash_needed > remaining_cash or bp_needed > remaining_buying_power:
+                                # Scale down based on the most limiting resource (cash or BP)
+                                scale_factor_cash = remaining_cash / cash_needed if cash_needed > 0 else 1.0
+                                scale_factor_bp = remaining_buying_power / bp_needed if bp_needed > 0 else 1.0
+                                scale_factor = min(scale_factor_cash, scale_factor_bp)
+                                
+                                adjusted_quantity = int(target_quantity * scale_factor)
+                                reason = "cash" if scale_factor_cash <= scale_factor_bp else "buying power"
+                                self.logger.info(f"Scaling down {ticker} debit spread from {target_quantity} to {adjusted_quantity} due to {reason} constraints")
+                                decision['_adjusted_quantity'] = adjusted_quantity
+                                if adjusted_quantity == 0: decision['skip_reason'] = f"Insufficient {reason} for debit spread"
+                                
+                                # Reduce resources by the adjusted amount
+                                cash_consumed = (cash_needed / target_quantity) * adjusted_quantity if target_quantity > 0 else 0
+                                bp_consumed = (bp_needed / target_quantity) * adjusted_quantity if target_quantity > 0 else 0
+                                remaining_cash -= cash_consumed
+                                remaining_buying_power -= bp_consumed
+                            else:
+                                # We can fulfill the entire target
+                                decision['_adjusted_quantity'] = target_quantity
+                                remaining_cash -= cash_needed
+                                remaining_buying_power -= bp_needed
+                        else:
+                            # Credit spread - check buying power (existing logic seems ok)
+                            bp_needed = req['buying_power_required']
+                            if bp_needed > remaining_buying_power:
+                                # Scale down quantity based on max risk
+                                if bp_needed > 0:
+                                    adjusted_quantity = int(remaining_buying_power / (bp_needed / target_quantity))
+                                else:
+                                    adjusted_quantity = target_quantity
+                                self.logger.info(f"Scaling down {ticker} credit spread from {target_quantity} to {adjusted_quantity} due to buying power constraints")
+                                decision['_adjusted_quantity'] = adjusted_quantity
+                                if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient buying power for credit spread"
+                                remaining_buying_power -= (bp_needed / target_quantity) * adjusted_quantity
+                            else:
+                                # We can fulfill the entire target
+                                decision['_adjusted_quantity'] = target_quantity
+                                remaining_buying_power -= bp_needed
+        else:
+            # If we have enough resources, use target quantities as adjusted quantities
+            for ticker, decision in sized_stock_decisions.items():
+                if '_target_quantity' in decision:
+                    decision['_adjusted_quantity'] = decision['_target_quantity']
+                    
+            for ticker, decision in sized_option_decisions.items():
+                if '_target_quantity' in decision:
+                    decision['_adjusted_quantity'] = decision['_target_quantity']
+        
+        # --- Handle Special Relationships (Covered Calls) ---
+        for option_ticker, underlying_ticker in covered_call_dependencies.items():
+            option_decision = sized_option_decisions[option_ticker]
+            
+            # Check if we have the underlying stock decision
+            if underlying_ticker in sized_stock_decisions:
+                stock_decision = sized_stock_decisions[underlying_ticker]
+                
+                # Get current holdings
+                current_holdings = 0
+                stock_position = stock_positions.get(underlying_ticker)
+                if stock_position and stock_position.get('side') == 'long':
+                    current_holdings = int(stock_position.get('qty', 0))
+                
+                # Get adjusted option quantity
+                option_quantity = option_decision.get('_adjusted_quantity', 0)
+                required_shares = 100 * option_quantity
+                
+                # Calculate how many more shares we need
+                shares_to_buy = required_shares - current_holdings
+                
+                if shares_to_buy > 0:
+                    # Check if we have a buy decision for this stock
+                    if underlying_ticker in sized_stock_decisions and sized_stock_decisions[underlying_ticker].get('action') == 'buy':
+                        # Update the buy quantity if it's less than what we need
+                        current_buy_qty = stock_decision.get('_adjusted_quantity', 0)
+                        if current_buy_qty < shares_to_buy:
+                            self.logger.info(f"Increasing {underlying_ticker} buy quantity from {current_buy_qty} to {shares_to_buy} for covered call")
+                            stock_decision['_adjusted_quantity'] = shares_to_buy
+                    else:
+                        # Create a new buy decision if we don't have one
+                        current_price = self._get_stock_price(underlying_ticker)
+                        if current_price:
+                            self.logger.info(f"Creating new buy decision for {underlying_ticker} with {shares_to_buy} shares for covered call")
+                            sized_stock_decisions[underlying_ticker] = {
+                                'ticker': underlying_ticker,
+                                'action': 'buy',
+                                'quantity': 0,  # Will be set in the final stage
+                                '_adjusted_quantity': shares_to_buy,
+                                'confidence': option_decision.get('confidence', 100.0),
+                                'reasoning': f'Auto-buying shares for covered call strategy.'
+                            }
+        
+        # --- Apply Individual Constraints and Set Final Quantities ---
+        # Stock decisions
+        for ticker, decision in sized_stock_decisions.items():
+            action = decision.get('action', 'hold').lower()
+            if action == 'hold' or '_adjusted_quantity' not in decision:
+                continue
+                
+            current_price = self._get_stock_price(ticker)
+            if current_price is None:
+                decision['skip_reason'] = f"Could not get current price for {ticker}"
+                continue
+                
+            # Apply position-specific constraints
+            adjusted_quantity = decision.get('_adjusted_quantity', 0)
+            final_quantity = self._apply_stock_constraints(
+                ticker, action, adjusted_quantity, current_price,
+                portfolio_value, initial_cash, initial_buying_power,
+                stock_positions, pending_quantities
+            )
+            
+            # Set the final quantity
+            decision['quantity'] = final_quantity
+            
+            # Clean up temporary fields
+            if '_target_quantity' in decision:
+                del decision['_target_quantity']
+            if '_adjusted_quantity' in decision:
+                del decision['_adjusted_quantity']
+        
+        # Option decisions
+        for ticker, decision in sized_option_decisions.items():
+            action = decision.get('action', 'none').lower()
+            if action in ['none', 'hold'] or '_adjusted_quantity' not in decision:
+                continue
+                
+            # Handle multi-leg strategies separately
+            if ticker in spread_strategies:
+                adjusted_quantity = decision.get('_adjusted_quantity', 0)
+                decision['quantity'] = adjusted_quantity
+                
+                # Apply any specific spread constraints here if needed
+                # For now, we're using the adjusted quantity directly
+                
+                # Clean up temporary fields
+                if '_target_quantity' in decision:
+                    del decision['_target_quantity']
+                if '_adjusted_quantity' in decision:
+                    del decision['_adjusted_quantity']
+                continue
+                
+            current_price = self._get_option_price(ticker, decision.get('limit_price'), options_positions)
+            if current_price is None:
+                decision['skip_reason'] = f"Could not determine current price for {ticker}"
+                continue
+                
+            # Apply option-specific constraints
+            adjusted_quantity = decision.get('_adjusted_quantity', 0)
+            
+            if action == 'close':
+                # For close actions, just use the existing position quantity
+                existing_position = options_positions.get(ticker)
+                final_quantity = abs(int(existing_position['qty'])) if existing_position else 0
+            else:
+                # For opening positions, apply constraints
+                strike_price = decision.get('strike_price')
+                option_type = decision.get('option_type')
+                
+                final_quantity = self._apply_option_constraints(
+                    ticker, action, adjusted_quantity, current_price,
+                    portfolio_value, initial_cash, initial_buying_power, # Pass buying_power here
+                    options_positions, strike_price, option_type
+                )
+            
+            # Set the final quantity
+            decision['quantity'] = final_quantity
+            
+            # Clean up temporary fields
+            if '_target_quantity' in decision:
+                del decision['_target_quantity']
+            if '_adjusted_quantity' in decision:
+                del decision['_adjusted_quantity']
+        
+        # Log the results
+        self.logger.info(f"Batch sizing complete. Sized {len(sized_stock_decisions)} stock decisions and {len(sized_option_decisions)} option decisions.")
+        
+        return sized_stock_decisions, sized_option_decisions
+        
+    def _mark_all_as_skipped(self, stock_decisions: Dict[str, Dict], option_decisions: Dict[str, Dict], reason: str):
+        """Helper method to mark all decisions as skipped with the given reason."""
+        for decision in stock_decisions.values():
+            decision['skip_reason'] = reason
+            
+        for decision in option_decisions.values():
+            decision['skip_reason'] = reason
 
     # Added specific state types to signature
     def calculate_combined_sizes(
@@ -79,8 +702,6 @@ class PortfolioSizerAgent:
         portfolio_value = portfolio_state.get('portfolio_value', 0)
         cash = portfolio_state.get('cash', 0)
         buying_power = portfolio_state.get('buying_power', 0)
-        # Attempt to get options-specific buying power, fall back to regular BP if not found
-        options_buying_power = portfolio_state.get('options_buying_power', buying_power)
         stock_positions = portfolio_state.get('positions', {}) # {symbol: {qty: ..., side: ...}}
         options_positions = options_portfolio_state.get('positions', {}) # {option_ticker: {qty: ..., side: ...}}
 
@@ -233,7 +854,6 @@ class PortfolioSizerAgent:
              self.logger.info(f"Final Sized Option Decision: {sized_option_decision}")
 
         return sized_stock_decision, sized_option_decision
-
 
     def _get_stock_price(self, symbol: str) -> Optional[float]:
         """Helper to get current stock price."""
@@ -405,7 +1025,7 @@ class PortfolioSizerAgent:
         self.logger.debug(f"Constrained stock qty for {symbol} ({action}): {final_quantity} (Target: {target_quantity if action in ['buy', 'short'] else 'N/A - Closing'}) (Existing: {existing_shares if existing_position else 0})")
         return final_quantity
 
-    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, options_positions: Dict, strike_price: Optional[float] = None, option_type: Optional[str] = None) -> int:
+    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, buying_power: float, options_positions: Dict, strike_price: Optional[float] = None, option_type: Optional[str] = None) -> int:
         """Apply portfolio constraints to the target option quantity."""
         if target_quantity <= 0 or current_price <= 0:
             return 0
@@ -430,11 +1050,16 @@ class PortfolioSizerAgent:
         existing_position = options_positions.get(option_ticker, None)
 
         if action == 'buy':
+            # Need buying_power passed into this function
+            # buying_power = portfolio_state.get('buying_power', 0) # Fetch buying power here - Removed, now passed as arg
+            
             existing_contracts = int(existing_position['qty']) if existing_position and existing_position.get('side') == 'long' else 0
             # Note: Original options sizing didn't check pending orders. Adding this might be complex.
             contracts_to_target = max_position_contracts - existing_contracts
             max_contracts_by_cash = int(cash / contract_value) if contract_value > 0 else 0
-            allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash)
+            max_contracts_by_bp = int(buying_power / contract_value) if contract_value > 0 else 0 # Check buying power
+            
+            allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash, max_contracts_by_bp) # Add BP check
             allowed_new_contracts = max(0, allowed_new_contracts)
             final_quantity = min(target_quantity, allowed_new_contracts)
 
@@ -651,7 +1276,7 @@ class PortfolioSizerAgent:
         self.logger.debug(f"Constrained stock qty for {symbol} ({action}): {final_quantity} (Target: {target_quantity if action in ['buy', 'short'] else 'N/A - Closing'}) (Existing: {existing_shares if existing_position else 0})")
         return final_quantity
 
-    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, options_positions: Dict, strike_price: Optional[float] = None, option_type: Optional[str] = None) -> int:
+    def _apply_option_constraints(self, option_ticker: str, action: str, target_quantity: int, current_price: float, portfolio_value: float, cash: float, buying_power: float, options_positions: Dict, strike_price: Optional[float] = None, option_type: Optional[str] = None) -> int:
         """Apply portfolio constraints to the target option quantity."""
         if target_quantity <= 0 or current_price <= 0:
             return 0
@@ -676,11 +1301,16 @@ class PortfolioSizerAgent:
         existing_position = options_positions.get(option_ticker, None)
 
         if action == 'buy':
+            # Need buying_power passed into this function
+            # buying_power = portfolio_state.get('buying_power', 0) # Fetch buying power here - Removed, now passed as arg
+            
             existing_contracts = int(existing_position['qty']) if existing_position and existing_position.get('side') == 'long' else 0
             # Note: Original options sizing didn't check pending orders. Adding this might be complex.
             contracts_to_target = max_position_contracts - existing_contracts
             max_contracts_by_cash = int(cash / contract_value) if contract_value > 0 else 0
-            allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash)
+            max_contracts_by_bp = int(buying_power / contract_value) if contract_value > 0 else 0 # Check buying power
+            
+            allowed_new_contracts = min(contracts_to_target, max_order_contracts, max_contracts_by_cash, max_contracts_by_bp) # Add BP check
             allowed_new_contracts = max(0, allowed_new_contracts)
             final_quantity = min(target_quantity, allowed_new_contracts)
 
@@ -866,7 +1496,7 @@ class PortfolioSizerAgent:
         # If net_debit is not provided, calculate it from the legs
         if net_debit is None:
             net_debit = 0
-            for leg in spread_decision['legs']:
+            for leg in spread_decision.get('legs', []):
                 leg_action = leg.get('action', '').lower()
                 leg_price = leg.get('limit_price', 0)
                 
