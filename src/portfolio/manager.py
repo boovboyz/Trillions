@@ -74,16 +74,20 @@ class PortfolioManager:
             'enable_trailing_stops': True,              # NEW: Enable ATR trailing stops
             'trailing_stop_atr_multiplier': 2.5,       # NEW: ATR multiplier for trailing stops
             'atr_lookback_period': 14,                  # NEW: Lookback period for ATR calculation
-            'simulate_csp_margin_for_spread_legs': True, # Add the simulation flag
+            'simulate_csp_margin_for_spread_legs': True # Default this to True
         }
         
         # Override defaults with provided config
         if config:
             self.config.update(config)
         
-        # Add the simulation flag (can be overridden by external config if needed)
-        self.config['simulate_csp_margin_for_spread_legs'] = self.config.get('simulate_csp_margin_for_spread_legs', True)
-        
+        # Explicitly set CSP margin simulation for paper trading compatibility
+        # Alpaca paper trading might incorrectly calculate margin for short legs in spreads.
+        # Setting this to False prevents the sizer from potentially overestimating margin needs.
+        # Set back to True or remove this line for live trading if broker requires it.
+        self.config['simulate_csp_margin_for_spread_legs'] = False
+        logger.info(f"Set simulate_csp_margin_for_spread_legs to {self.config['simulate_csp_margin_for_spread_legs']} for paper trading.")
+
         self._last_update = None  # Timestamp of last update
         self.update_interval = 30  # Update portfolio status every 30 seconds
         
@@ -752,7 +756,17 @@ class PortfolioManager:
                      "side": pos.get("side")
                  } for ticker, pos in portfolio_state.get('positions', {}).items()
             }
-            portfolio_positions_json = safe_json_dumps(simple_positions, indent=2)
+
+            # --- ADDED: Filter to include only stock positions for the LLM ---
+            stock_positions_only = {}
+            for ticker, pos_data in simple_positions.items():
+                # Basic OCC format check: Root(1-6 chars) + YYMMDD + C/P + Strike(8 digits)
+                is_option = bool(re.match(r"^[A-Z]{1,6}(\d{6})([CP])(\d{8})$", ticker))
+                if not is_option:
+                    stock_positions_only[ticker] = pos_data
+            # --- END ADDED ---
+
+            portfolio_positions_json = safe_json_dumps(stock_positions_only, indent=2) # Use filtered dict
 
         except Exception as e:
             logging.error(f"Error serializing data for AI prompt: {e}")

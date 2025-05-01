@@ -329,10 +329,10 @@ class PortfolioSizerAgent:
         self.logger.info(f"Resource requirements - Cash: ${total_cash_required:.2f}, BP: ${total_buying_power_required:.2f}")
         self.logger.info(f"Available resources - Cash: ${available_cash:.2f}, BP: ${initial_buying_power:.2f}")
         
-        # --- Prioritize and Allocate Resources ---
-        # If we need more resources than available, prioritize trades
+        # --- Prioritization Loop (First Pass Scaling) ---
+        prioritized_requirements = [] # Define this to store tuples (req_id, req)
         if total_cash_required > available_cash or total_buying_power_required > initial_buying_power:
-            self.logger.info("Resource constraints detected. Prioritizing trades...")
+            self.logger.info("Resource constraints detected. Prioritizing trades (Pass 1)...")
             
             # Combine all resource requirements for prioritization
             all_requirements = {}
@@ -360,163 +360,123 @@ class PortfolioSizerAgent:
                     'priority_adjustment': priority_adjustment
                 }
             
-            # Sort by priority (confidence + priority_adjustment)
+            # Sort by priority
             prioritized_requirements = sorted(
                 all_requirements.items(),
                 key=lambda x: (x[1].get('confidence', 0) + x[1].get('priority_adjustment', 0)),
-                reverse=True  # Higher confidence first
+                reverse=True
             )
-            
+
             # Virtual resources for allocation
             remaining_cash = available_cash
             remaining_buying_power = initial_buying_power
-            
-            # Allocate resources based on priority
+
+            # Store the prioritized list for potential second pass
+            prioritized_requirements = sorted(
+                all_requirements.items(),
+                key=lambda x: (x[1].get('confidence', 0) + x[1].get('priority_adjustment', 0)),
+                reverse=True
+            )
+
+            # Allocate resources based on priority (First Pass)
             for req_id, req in prioritized_requirements:
                 req_type = req['type']
                 ticker = req['ticker']
                 action = req['action']
                 
-                # Skip sell/cover/close actions since they don't consume initial resources
+                # Default _adjusted_quantity to 0 if not already set (e.g., for sell/cover)
+                decision = sized_stock_decisions[ticker] if req_type == 'stock' else sized_option_decisions[ticker]
+                if '_adjusted_quantity' not in decision:
+                     decision['_adjusted_quantity'] = decision.get('_target_quantity', 0) # Start with target if not scaled yet
+
+                # Skip sell/cover/close actions in this allocation loop
                 if action in ['sell', 'cover', 'close']:
+                    # Ensure _adjusted_quantity is set for these actions if they weren't hit by constraints
+                    decision['_adjusted_quantity'] = decision.get('_target_quantity', 0)
                     continue
                 
+                target_quantity = decision.get('_target_quantity', 0)
+                if target_quantity <= 0: # Skip if target was already zero
+                    decision['_adjusted_quantity'] = 0
+                    continue
+
+                # --- Calculate Cash and BP needed PER UNIT for scaling ---
+                cash_per_unit = 0
+                bp_per_unit = 0
+                price = req.get('price', 0)
+
                 if req_type == 'stock':
-                    decision = sized_stock_decisions[ticker]
-                    target_quantity = decision.get('_target_quantity', 0)
-                    
                     if action == 'buy':
-                        # Check if we have enough cash
-                        cash_needed = req['price'] * target_quantity
-                        if cash_needed > remaining_cash:
-                            # Scale down quantity
-                            adjusted_quantity = int(remaining_cash / req['price'])
-                            self.logger.info(f"Scaling down {ticker} buy from {target_quantity} to {adjusted_quantity} due to cash constraints")
-                            decision['_adjusted_quantity'] = adjusted_quantity
-                            if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient cash for stock buy"
-                            remaining_cash -= req['price'] * adjusted_quantity
-                            remaining_buying_power -= req['price'] * adjusted_quantity
-                        else:
-                            # We can fulfill the entire target
-                            decision['_adjusted_quantity'] = target_quantity
-                            remaining_cash -= cash_needed
-                            remaining_buying_power -= cash_needed
-                    
+                        cash_per_unit = price
+                        bp_per_unit = price # Buys also consume BP
                     elif action == 'short':
-                        # Check if we have enough buying power
-                        bp_needed = req['buying_power_required']
-                        if bp_needed > remaining_buying_power:
-                            # Scale down quantity
-                            adjusted_quantity = int(remaining_buying_power / (req['price'] * 1.5))
-                            self.logger.info(f"Scaling down {ticker} short from {target_quantity} to {adjusted_quantity} due to buying power constraints")
-                            decision['_adjusted_quantity'] = adjusted_quantity
-                            if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient buying power for short"
-                            remaining_buying_power -= req['price'] * adjusted_quantity * 1.5
-                        else:
-                            # We can fulfill the entire target
-                            decision['_adjusted_quantity'] = target_quantity
-                            remaining_buying_power -= bp_needed
-                
+                        cash_per_unit = 0
+                        # Use the BP requirement calculation, per unit
+                        bp_per_unit = price * 1.5 # Assuming 1.5x margin factor
+
                 elif req_type == 'option':
-                    decision = sized_option_decisions[ticker]
-                    target_quantity = decision.get('_target_quantity', 0)
-                    
                     if action == 'buy':
-                        # Check if we have enough cash
-                        cash_needed = req['price'] * 100 * target_quantity
-                        if cash_needed > remaining_cash:
-                            # Scale down quantity
-                            adjusted_quantity = int(remaining_cash / (req['price'] * 100))
-                            self.logger.info(f"Scaling down {ticker} option buy from {target_quantity} to {adjusted_quantity} due to cash constraints")
-                            decision['_adjusted_quantity'] = adjusted_quantity
-                            if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient cash for option buy"
-                            remaining_cash -= req['price'] * 100 * adjusted_quantity
-                            remaining_buying_power -= req['price'] * 100 * adjusted_quantity
-                        else:
-                            # We can fulfill the entire target
-                            decision['_adjusted_quantity'] = target_quantity
-                            remaining_cash -= cash_needed
-                            remaining_buying_power -= cash_needed
-                    
+                        cash_per_unit = price * 100
+                        bp_per_unit = price * 100
                     elif action == 'sell':
                         if ticker in cash_secured_puts:
-                            # For cash-secured puts, check cash constraints
                             strike_price = decision.get('strike_price', 0)
-                            cash_needed = strike_price * 100 * target_quantity
-                            if cash_needed > remaining_cash:
-                                # Scale down quantity
-                                adjusted_quantity = int(remaining_cash / (strike_price * 100))
-                                self.logger.info(f"Scaling down {ticker} CSP from {target_quantity} to {adjusted_quantity} due to cash constraints")
-                                decision['_adjusted_quantity'] = adjusted_quantity
-                                if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient cash for CSP"
-                                remaining_cash -= strike_price * 100 * adjusted_quantity
-                            else:
-                                # We can fulfill the entire target
-                                decision['_adjusted_quantity'] = target_quantity
-                                remaining_cash -= cash_needed
-                        else:
-                            # For other sells (like covered calls), check buying power
-                            bp_needed = req['buying_power_required']
-                            if bp_needed > remaining_buying_power:
-                                # Scale down quantity
-                                adjusted_quantity = int(remaining_buying_power / (req['price'] * 100 * 0.2))
-                                self.logger.info(f"Scaling down {ticker} option sell from {target_quantity} to {adjusted_quantity} due to buying power constraints")
-                                decision['_adjusted_quantity'] = adjusted_quantity
-                                if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient buying power for option sell"
-                                remaining_buying_power -= req['price'] * 100 * 0.2 * adjusted_quantity
-                            else:
-                                # We can fulfill the entire target
-                                decision['_adjusted_quantity'] = target_quantity
-                                remaining_buying_power -= bp_needed
-                    
+                            cash_per_unit = strike_price * 100
+                            bp_per_unit = 0 # CSPs primarily consume cash
+                        else: # Covered calls etc.
+                            cash_per_unit = 0
+                            # Approximate margin
+                            bp_per_unit = price * 100 * 0.2
                     elif action == 'spread':
-                        if req.get('is_debit_spread', False):
-                            # Debit spread - check cash AND buying power
-                            cash_needed = req['cash_required']
-                            bp_needed = req['buying_power_required'] # Get required BP
-                            
-                            # Check constraints
-                            if cash_needed > remaining_cash or bp_needed > remaining_buying_power:
-                                # Scale down based on the most limiting resource (cash or BP)
-                                scale_factor_cash = remaining_cash / cash_needed if cash_needed > 0 else 1.0
-                                scale_factor_bp = remaining_buying_power / bp_needed if bp_needed > 0 else 1.0
-                                scale_factor = min(scale_factor_cash, scale_factor_bp)
-                                
-                                adjusted_quantity = int(target_quantity * scale_factor)
-                                reason = "cash" if scale_factor_cash <= scale_factor_bp else "buying power"
-                                self.logger.info(f"Scaling down {ticker} debit spread from {target_quantity} to {adjusted_quantity} due to {reason} constraints")
-                                decision['_adjusted_quantity'] = adjusted_quantity
-                                if adjusted_quantity == 0: decision['skip_reason'] = f"Insufficient {reason} for debit spread"
-                                
-                                # Reduce resources by the adjusted amount
-                                cash_consumed = (cash_needed / target_quantity) * adjusted_quantity if target_quantity > 0 else 0
-                                bp_consumed = (bp_needed / target_quantity) * adjusted_quantity if target_quantity > 0 else 0
-                                remaining_cash -= cash_consumed
-                                remaining_buying_power -= bp_consumed
-                            else:
-                                # We can fulfill the entire target
-                                decision['_adjusted_quantity'] = target_quantity
-                                remaining_cash -= cash_needed
-                                remaining_buying_power -= bp_needed
-                        else:
-                            # Credit spread - check buying power (existing logic seems ok)
-                            bp_needed = req['buying_power_required']
-                            if bp_needed > remaining_buying_power:
-                                # Scale down quantity based on max risk
-                                if bp_needed > 0:
-                                    adjusted_quantity = int(remaining_buying_power / (bp_needed / target_quantity))
-                                else:
-                                    adjusted_quantity = target_quantity
-                                self.logger.info(f"Scaling down {ticker} credit spread from {target_quantity} to {adjusted_quantity} due to buying power constraints")
-                                decision['_adjusted_quantity'] = adjusted_quantity
-                                if adjusted_quantity == 0: decision['skip_reason'] = "Insufficient buying power for credit spread"
-                                remaining_buying_power -= (bp_needed / target_quantity) * adjusted_quantity
-                            else:
-                                # We can fulfill the entire target
-                                decision['_adjusted_quantity'] = target_quantity
-                                remaining_buying_power -= bp_needed
+                        if req.get('is_debit_spread'):
+                            # Recalculate based on net_price per unit
+                            debit_spread_bp_multiplier = 2.0 # Heuristic multiplier
+                            cash_per_unit = max(0, price * 100) # price here is net_price
+                            bp_per_unit = max(0, price * 100) * debit_spread_bp_multiplier # Apply heuristic multiplier
+                            self.logger.debug(f"Debit Spread BP Calc: price={price:.2f}, cash_pu={cash_per_unit:.2f}, bp_pu={bp_per_unit:.2f} (mult={debit_spread_bp_multiplier})")
+                        else: # Credit spread
+                            cash_per_unit = 0
+                            # Recalculate BP per unit based on max risk
+                            max_risk_total = req.get('buying_power_required', 0)
+                            bp_per_unit = max_risk_total / target_quantity if target_quantity > 0 else 0
+
+                # --- Apply Constraints (First Pass) ---
+                adjusted_quantity = target_quantity
+                
+                # Calculate resource needs for the TARGET quantity
+                cash_needed_target = cash_per_unit * target_quantity
+                bp_needed_target = bp_per_unit * target_quantity
+
+                if cash_needed_target > remaining_cash or bp_needed_target > remaining_buying_power:
+                    # Determine scale factors based on available resources
+                    scale_factor_cash = remaining_cash / cash_needed_target if cash_needed_target > 0 else 1.0
+                    scale_factor_bp = remaining_buying_power / bp_needed_target if bp_needed_target > 0 else 1.0
+                    scale_factor = min(scale_factor_cash, scale_factor_bp, 1.0) # Ensure <= 1.0
+
+                    adjusted_quantity = int(target_quantity * scale_factor) # Use floor (int conversion)
+                    
+                    reason = "cash" if scale_factor_cash <= scale_factor_bp else "buying power"
+                    self.logger.info(f"Pass 1 Scaling: {req_type} {ticker} {action} from {target_quantity} to {adjusted_quantity} due to {reason} constraints")
+                    
+                    if adjusted_quantity == 0 and target_quantity > 0:
+                         decision['skip_reason'] = f"Insufficient {reason} for {action} (Pass 1)"
+
+                # Store the adjusted quantity (even if not scaled)
+                decision['_adjusted_quantity'] = adjusted_quantity
+
+                # Reduce virtual resources by the amount CONSUMED by the ADJUSTED quantity
+                cash_consumed = cash_per_unit * adjusted_quantity
+                bp_consumed = bp_per_unit * adjusted_quantity
+                remaining_cash -= cash_consumed
+                remaining_buying_power -= bp_consumed
+                
+                # Ensure remaining resources don't go negative due to float issues
+                remaining_cash = max(0, remaining_cash)
+                remaining_buying_power = max(0, remaining_buying_power)
+
         else:
-            # If we have enough resources, use target quantities as adjusted quantities
+            # If we have enough resources initially, use target quantities as adjusted quantities
+            self.logger.info("Initial resource check passed. No prioritization needed.")
             for ticker, decision in sized_stock_decisions.items():
                 if '_target_quantity' in decision:
                     decision['_adjusted_quantity'] = decision['_target_quantity']
@@ -524,7 +484,145 @@ class PortfolioSizerAgent:
             for ticker, decision in sized_option_decisions.items():
                 if '_target_quantity' in decision:
                     decision['_adjusted_quantity'] = decision['_target_quantity']
-        
+
+        # --- Recalculate Requirements and Second Pass Scaling (If Needed) ---
+        recalculated_cash_required = 0
+        recalculated_bp_required = 0
+        active_trades_pass2 = [] # List of (decision_dict, req_info)
+
+        # Combine decisions again for recalculation
+        all_adjusted_decisions = {**sized_stock_decisions, **sized_option_decisions}
+
+        for identifier, decision in all_adjusted_decisions.items():
+            adjusted_quantity = decision.get('_adjusted_quantity', 0)
+            if adjusted_quantity <= 0:
+                continue # Skip trades already scaled to zero or holds
+
+            action = decision.get('action', 'hold').lower()
+            if action in ['hold', 'none', 'sell', 'cover', 'close']: # Only consider resource-consuming actions
+                 continue
+
+            is_stock = identifier in sized_stock_decisions
+            ticker = decision.get('ticker') if not is_stock else identifier
+            underlying_ticker = decision.get('underlying_ticker') # For spreads
+
+            # Re-fetch or recalculate price and per-unit requirements
+            # This logic needs to mirror the initial requirement calculation
+            price = 0
+            cash_per_unit = 0
+            bp_per_unit = 0
+
+            if is_stock:
+                 current_price = self._get_stock_price(ticker)
+                 if current_price is None: continue # Should have been skipped before, but safety
+                 price = current_price
+                 if action == 'buy':
+                     cash_per_unit = price
+                     bp_per_unit = price
+                 elif action == 'short':
+                     cash_per_unit = 0
+                     bp_per_unit = price * 1.5
+            else: # Option
+                 is_spread = identifier in spread_strategies
+                 limit_price = decision.get('limit_price') # Single leg limit
+                 net_limit_price = decision.get('net_limit_price') # Spread limit
+
+                 current_price = self._get_option_price(ticker, limit_price, options_positions) if not is_spread else net_limit_price
+                 if current_price is None:
+                      # Try calculating net price for spread if needed
+                      if is_spread and net_limit_price is None:
+                           net_price_calc = 0
+                           for leg in decision.get('legs', []):
+                               leg_action = leg.get('action', '').lower()
+                               leg_price = leg.get('limit_price', 0)
+                               if leg_action == 'buy': net_price_calc += leg_price
+                               elif leg_action == 'sell': net_price_calc -= leg_price
+                           current_price = net_price_calc
+                      else:
+                           continue # Cannot get price
+
+                 price = current_price
+
+                 if action == 'buy':
+                      cash_per_unit = price * 100
+                      bp_per_unit = price * 100
+                 elif action == 'sell':
+                      if ticker in cash_secured_puts:
+                           strike_price = decision.get('strike_price', 0)
+                           cash_per_unit = strike_price * 100
+                           bp_per_unit = 0
+                      else: # Covered calls etc.
+                           cash_per_unit = 0
+                           bp_per_unit = price * 100 * 0.2
+                 elif action == 'spread':
+                     is_debit = decision.get('strategy', '').lower() in ['bull_call_spread', 'bear_put_spread']
+                     if is_debit:
+                          debit_spread_bp_multiplier = 2.0 # Heuristic multiplier (repeat here)
+                          cash_per_unit = max(0, price * 100) # price is net_price
+                          bp_per_unit = max(0, price * 100) * debit_spread_bp_multiplier # Apply heuristic multiplier
+                     else: # Credit spread
+                          cash_per_unit = 0
+                          # Need to recalculate max risk per unit
+                          max_risk_total = 0 # Placeholder, logic from initial calc needed
+                          strikes = [leg.get('strike_price', 0) for leg in decision.get('legs', [])]
+                          if len(strikes) >= 2:
+                              width = abs(max(strikes) - min(strikes))
+                              max_risk_total = width * 100 * adjusted_quantity # Risk for adjusted qty
+                          bp_per_unit = max_risk_total / adjusted_quantity if adjusted_quantity > 0 else 0
+
+
+            # Add requirements for this trade
+            trade_cash_req = cash_per_unit * adjusted_quantity
+            trade_bp_req = bp_per_unit * adjusted_quantity
+            recalculated_cash_required += trade_cash_req
+            recalculated_bp_required += trade_bp_req
+
+            active_trades_pass2.append({
+                'decision': decision,
+                'cash_per_unit': cash_per_unit,
+                'bp_per_unit': bp_per_unit,
+                'adjusted_quantity': adjusted_quantity,
+                 'is_stock': is_stock
+            })
+
+        # Check constraints again with recalculated totals
+        if recalculated_cash_required > available_cash or recalculated_bp_required > initial_buying_power:
+            self.logger.warning(f"Resource constraints still exist after Pass 1. Required: Cash=${recalculated_cash_required:.2f}, BP=${recalculated_bp_required:.2f}. Available: Cash=${available_cash:.2f}, BP=${initial_buying_power:.2f}. Starting Pass 2 scaling...")
+
+            # Calculate overall scaling factors
+            cash_scale_factor = available_cash / recalculated_cash_required if recalculated_cash_required > 0 else 1.0
+            bp_scale_factor = initial_buying_power / recalculated_bp_required if recalculated_bp_required > 0 else 1.0
+            final_scale_factor = min(cash_scale_factor, bp_scale_factor, 1.0) # Ensure <= 1.0
+
+            self.logger.info(f"Pass 2 scaling factor: {final_scale_factor:.4f} (Limited by {'cash' if cash_scale_factor <= bp_scale_factor else 'buying power'})")
+
+            # Apply proportional scaling to all active trades
+            for trade_info in active_trades_pass2:
+                decision = trade_info['decision']
+                current_adjusted_quantity = trade_info['adjusted_quantity']
+                
+                # Only scale trades that consume the limiting resource
+                consumes_cash = trade_info['cash_per_unit'] > 0
+                consumes_bp = trade_info['bp_per_unit'] > 0
+                should_scale = False
+                if final_scale_factor < 1.0:
+                     if cash_scale_factor <= bp_scale_factor and consumes_cash: # Cash limited
+                          should_scale = True
+                     elif bp_scale_factor < cash_scale_factor and consumes_bp: # BP limited
+                          should_scale = True
+                     elif consumes_cash and consumes_bp: # If both limited, scale if consumes either
+                          should_scale = True # Simplified: scale if consumes the limiting one
+
+                if should_scale:
+                     new_adjusted_quantity = int(current_adjusted_quantity * final_scale_factor) # Floor
+                     if new_adjusted_quantity < current_adjusted_quantity:
+                          self.logger.info(f"Pass 2 Scaling: {'Stock' if trade_info['is_stock'] else 'Option'} {decision.get('ticker', decision.get('underlying_ticker'))} quantity reduced from {current_adjusted_quantity} to {new_adjusted_quantity}")
+                          decision['_adjusted_quantity'] = new_adjusted_quantity
+                          if new_adjusted_quantity == 0:
+                               decision['skip_reason'] = "Scaled to zero in Pass 2 due to resource constraints"
+                # Else: keep the adjusted quantity from Pass 1
+
+
         # --- Handle Special Relationships (Covered Calls) ---
         for option_ticker, underlying_ticker in covered_call_dependencies.items():
             option_decision = sized_option_decisions[option_ticker]
