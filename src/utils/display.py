@@ -953,4 +953,89 @@ def _wrap_text(text: str, width: int) -> str:
         wrapped += current_line
     return wrapped
 
+# --- NEW: Position Management Summary Table ---
+def print_position_management_summary(execution_results: Dict[str, Any]) -> None:
+    """
+    Print a summary table of position management actions taken.
+    
+    Args:
+        execution_results: The result dictionary from PositionManagementAgent.execute_management_actions.
+    """
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}POSITION MANAGEMENT SUMMARY:{Style.RESET_ALL}")
+    if not execution_results:
+        print(f"{Fore.YELLOW}No position management actions were executed or results available.{Style.RESET_ALL}")
+        return
+        
+    table_data = []
+    for ticker, ticker_action_results in execution_results.items():
+        if isinstance(ticker_action_results, list):
+            for result in ticker_action_results:
+                action = result.get('action', 'unknown').replace('_', ' ').title()
+                status = result.get('status', 'unknown').upper()
+                message = result.get('message', '')
+                details = result.get('details') # For adjustments
+                order_result = result.get('result', {}) # For trade actions
+                order = order_result.get('order') if isinstance(order_result, dict) else None
+                
+                status_color = {
+                    'SKIPPED': Fore.YELLOW,
+                    'ERROR': Fore.RED,
+                    'SUCCESS': Fore.GREEN,
+                    'EXECUTED': Fore.GREEN, 
+                    'UNKNOWN': Fore.MAGENTA
+                }.get(status, Fore.WHITE)
+                
+                qty_str = "-"
+                order_id_short = "-"
+                
+                if status == 'EXECUTED' and order:
+                    qty = order.get('qty')
+                    qty_str = f"{qty:,.0f}" if qty is not None else "-"
+                    order_id = order.get('id', '-')
+                    order_id_short = order_id.split('-')[0] + "..." if order_id != '-' else '-'
+                elif details and 'quantity' in details:
+                    qty = details.get('quantity')
+                    qty_str = f"{qty:,.0f}" if qty is not None else "-"
+                    
+                # Add details for adjustments if present
+                if details and 'price_target' in details:
+                    message += f" (Target: {details['price_target']})"
+                elif order_result and 'message' in order_result and status != 'EXECUTED': # Show order message if not executed
+                    message = order_result.get('message', message)
+                    
+                wrapped_message = _wrap_text(message, 40)
+                    
+                table_data.append([
+                    f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
+                    f"{status_color}{action}{Style.RESET_ALL}",
+                    f"{status_color}{status}{Style.RESET_ALL}",
+                    f"{Fore.WHITE}{qty_str}{Style.RESET_ALL}",
+                    f"{Fore.WHITE}{order_id_short}{Style.RESET_ALL}",
+                    f"{Fore.WHITE}{wrapped_message}{Style.RESET_ALL}"
+                ])
+        else:
+             # Handle cases where the result for a ticker isn't a list (e.g., top-level error)
+             status = ticker_action_results.get('status', 'error').upper()
+             message = ticker_action_results.get('message', 'Unknown error')
+             wrapped_message = _wrap_text(message, 40)
+             status_color = Fore.RED
+             table_data.append([
+                 f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
+                 f"{status_color}ANALYSIS ERROR{Style.RESET_ALL}",
+                 f"{status_color}{status}{Style.RESET_ALL}",
+                 "-",
+                 "-",
+                 f"{Fore.WHITE}{wrapped_message}{Style.RESET_ALL}"
+             ])
+
+    headers = [
+        f"{Fore.WHITE}Ticker", 
+        "Management Action", 
+        "Status", 
+        "Qty", 
+        "Order ID", 
+        "Message/Details"
+    ]
+    print(tabulate(table_data, headers=headers, tablefmt="grid"))
+
 # --- End Options Trading Display Functions ---

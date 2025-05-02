@@ -21,7 +21,8 @@ from src.utils.llm import call_llm
 import logging
 from datetime import datetime
 import re
-from src.agents.portfolio_sizer import PortfolioSizerAgent  # Import the new agent
+from src.agents.portfolio_sizer import RobustPortfolioSizer  # Import the new sizer agent
+from src.agents.position_management import PositionManagementAgent  # Import the new position manager
 from src.integrations.polygon import PolygonClient # Assuming this exists
 
 logger = logging.getLogger(__name__) # Add logger instance
@@ -54,8 +55,8 @@ class PortfolioManager:
         
         # Default configuration
         self.config = {
-            'max_position_size_pct': 0.33,              # Max position size as percentage of portfolio
-            'max_single_order_size_pct': 0.10,          # Max single order as percentage of portfolio
+            'max_position_size_pct': 0.15,              # Max position size as percentage of portfolio
+            'max_single_order_size_pct': 0.05,          # Max single order as percentage of portfolio
             'stop_loss_pct': 0.05,                      # Default stop loss percentage
             'profit_target_pct': 0.15,                  # Default profit target percentage
             'position_scaling': True,                   # Whether to scale positions
@@ -71,23 +72,21 @@ class PortfolioManager:
             'max_short_position_size_pct': 0.20,        # Max short position size (% of portfolio)
             'short_stop_loss_pct': 0.06,                # Stop loss for short positions (higher to be cautious)
             'short_profit_target_pct': 0.12,            # Profit target for short positions
-            'enable_trailing_stops': True,              # NEW: Enable ATR trailing stops
-            'trailing_stop_atr_multiplier': 2.5,       # NEW: ATR multiplier for trailing stops
-            'atr_lookback_period': 14,                  # NEW: Lookback period for ATR calculation
-            'simulate_csp_margin_for_spread_legs': True # Default this to True
+            'enable_trailing_stops': True,              # Enable ATR trailing stops
+            'trailing_stop_atr_multiplier': 2.5,        # ATR multiplier for trailing stops
+            'atr_lookback_period': 14,                  # Lookback period for ATR calculation
+            'simulate_csp_margin_for_spread_legs': False, # Default this to False for paper trading
+            'risk_percent_per_trade': 1.0,              # Risk percent per trade (for base sizing)
+            'options_risk_factor': 0.5,                 # Factor to reduce options risk (vs stocks)
+            'base_volatility': 20.0,                    # Base volatility level for adjustment
+            'max_volatility_reduction': 0.7,            # Maximum reduction for high volatility
+            'options_allocation_pct': 0.15              # Maximum allocation to options
         }
         
         # Override defaults with provided config
         if config:
             self.config.update(config)
         
-        # Explicitly set CSP margin simulation for paper trading compatibility
-        # Alpaca paper trading might incorrectly calculate margin for short legs in spreads.
-        # Setting this to False prevents the sizer from potentially overestimating margin needs.
-        # Set back to True or remove this line for live trading if broker requires it.
-        self.config['simulate_csp_margin_for_spread_legs'] = False
-        logger.info(f"Set simulate_csp_margin_for_spread_legs to {self.config['simulate_csp_margin_for_spread_legs']} for paper trading.")
-
         self._last_update = None  # Timestamp of last update
         self.update_interval = 30  # Update portfolio status every 30 seconds
         
@@ -102,15 +101,25 @@ class PortfolioManager:
             'last_update': None
         }
         
-        # Instantiate the Portfolio Sizer Agent
-        # It needs config, alpaca client, polygon client, and portfolio cache
-        self.portfolio_sizer_agent = PortfolioSizerAgent(
+        # Initialize the new Portfolio Sizer
+        self.portfolio_sizer = RobustPortfolioSizer(
             config=self.config,
             alpaca_client=self.alpaca,
             polygon_client=self.polygon,
-            portfolio_cache=self.portfolio_cache # Pass the cache reference
+            portfolio_cache=self.portfolio_cache
         )
-        logger.info("PortfolioManager initialized with PortfolioSizerAgent.")
+        logger.info("PortfolioManager initialized with RobustPortfolioSizer.")
+        
+        # Initialize the new Position Management Agent
+        self.position_manager = PositionManagementAgent(
+            config=self.config,
+            alpaca_client=self.alpaca,
+            polygon_client=self.polygon,
+            portfolio_cache=self.portfolio_cache
+        )
+        # Set portfolio_manager reference to enable proper position lookup
+        self.position_manager.portfolio_manager = self
+        logger.info("PortfolioManager initialized with PositionManagementAgent.")
 
     def update_portfolio_cache(self, force: bool = False) -> None:
         """
@@ -140,7 +149,7 @@ class PortfolioManager:
             self.portfolio_cache['orders'] = self.alpaca.get_orders(status='all')
             
             self.portfolio_cache['last_update'] = now
-            
+        
     def get_portfolio_state(self) -> Dict[str, Any]:
         """
         Get the current state of the portfolio.
@@ -960,324 +969,52 @@ class PortfolioManager:
     def manage_positions(self) -> Dict[str, Dict]:
         """
         Manage existing positions (adjust stops, scale in/out, etc.).
+        Uses the new PositionManagementAgent for intelligent position management.
         
         Returns:
             Dict with management actions taken.
         """
         # Update portfolio state
         self.update_portfolio_cache(force=True)
-        portfolio_state = self.get_portfolio_state()
         
-        management_actions = {}
-        
-        # Check if we have sufficient buying power to even consider trading
-        buying_power = portfolio_state.get('buying_power', 0)
-        if buying_power <= 0:
-            logger.warning(f"Position management skipped: Insufficient buying power (${buying_power:.2f})")
-            return {'status': 'skipped', 'reason': 'Insufficient buying power'}
-        
-        # Only proceed if we have positions
-        # portfolio_state['positions'] is now a dict {symbol: position_dict}
-        if not portfolio_state.get('positions'):
-            return management_actions
+        # Analyze and manage positions using the PositionManagementAgent
+        try:
+            # Get the model name and provider from the application config or use defaults
+            model_name = "meta-llama/llama-4-maverick-17b-128e-instruct"  # Default model
+            model_provider = "groq"  # Default provider
             
-        # Check scaling conditions for each position dictionary (iterate over values)
-        for position in portfolio_state['positions'].values(): 
-            symbol = position['symbol']
-            side = position['side']
-            scale_in = position.get('scale_in', False)
-            scale_out = position.get('scale_out', False)
+            # Run position analysis
+            management_result = self.position_manager.manage_positions(
+                model_name=model_name,
+                model_provider=model_provider
+            )
             
-            # Skip if neither scaling condition is met
-            if not scale_in and not scale_out:
-                continue
-                
-            # Calculate scaling size (percentage of current position)
-            qty = int(position['qty'])
-            scaling_size = max(1, int(abs(qty) * self.config['scaling_size_pct']))
+            # Execute the recommended actions
+            execution_results = self.position_manager.execute_management_actions(management_result)
             
-            if scale_in:
-                # We're losing money, consider adding to position if conditions are right
-                
-                # Verify risk management
-                if self._check_drawdown_threshold(portfolio_state):
-                    # Skip scaling in if we're in drawdown
-                    management_actions[symbol] = {
-                        'action': 'skip_scale_in',
-                        'reason': 'Drawdown threshold reached'
-                    }
-                    continue
-                    
-                # Check position already at max size
-                position_pct = float(position['weight'])
-                if position_pct >= self.config['max_position_size_pct'] * 100:
-                    management_actions[symbol] = {
-                        'action': 'skip_scale_in',
-                        'reason': 'Position already at maximum size'
-                    }
-                    continue
-                
-                # Create scaling decision
-                if side == 'long':
-                    action = 'buy'
-                else:  # short
-                    action = 'short'
-                    
-                decision = {
-                    'ticker': symbol, # Add ticker for sizer
-                    'action': action,
-                    # 'quantity': scaling_size, # Quantity is determined by sizer
-                    'confidence': 80,  # High confidence for scaling decisions
-                    'reason': 'Scale in'
-                }
-                
-                # Size the decision properly using the PortfolioSizerAgent
-                try:
-                    sized_stock_decision, _ = self.portfolio_sizer_agent.calculate_combined_sizes(
-                        stock_decision=decision,
-                        option_decision=None,
-                        portfolio_state=portfolio_state,
-                        options_portfolio_state=self.get_options_portfolio_state() # Get fresh options state
-                    )
-                except Exception as e:
-                     logger.error(f"Error sizing scale_in decision for {symbol}: {e}", exc_info=True)
-                     continue # Skip execution if sizing fails
-                
-                # Only execute if quantity > 0 AND there's no skip_reason
-                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0 and not sized_stock_decision.get('skip_reason'):
-                    # One more check on buying power before execution
-                    if portfolio_state.get('buying_power', 0) <= 0:
-                        logger.warning(f"Cancelling scale_in for {symbol}: No buying power available")
-                        management_actions[symbol] = {
-                            'action': 'skip_scale_in',
-                            'reason': 'No buying power available'
-                        }
-                        continue
-                        
-                    # Wrap for Alpaca execution function
-                    execution_input = {symbol: sized_stock_decision}
-                    result = self.alpaca.execute_trading_decisions(execution_input)
-                    management_actions[symbol] = {
-                        'action': 'scale_in',
-                        'result': result.get(symbol) # Use .get for safety
-                    }
-                elif sized_stock_decision:
-                     logger.info(f"Skipping scale_in execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
-                    
-            elif scale_out:
-                # We're profitable, consider reducing position
-                
-                # Calculate scaling size
-                scaling_size = max(1, int(abs(qty) * self.config['scaling_size_pct']))
-                
-                # Create scaling decision
-                if side == 'long':
-                    action = 'sell'
-                else:  # short
-                    action = 'cover'
-                    
-                decision = {
-                    'ticker': symbol, # Add ticker for sizer
-                    'action': action,
-                    # 'quantity': scaling_size, # Quantity is determined by sizer
-                    'confidence': 80,  # High confidence for scaling decisions
-                    'reason': 'Scale out'
-                }
-                
-                # Size the decision properly using the PortfolioSizerAgent
-                try:
-                    sized_stock_decision, _ = self.portfolio_sizer_agent.calculate_combined_sizes(
-                        stock_decision=decision,
-                        option_decision=None,
-                        portfolio_state=portfolio_state,
-                        options_portfolio_state=self.get_options_portfolio_state() # Get fresh options state
-                    )
-                except Exception as e:
-                     logger.error(f"Error sizing scale_out decision for {symbol}: {e}", exc_info=True)
-                     continue # Skip execution if sizing fails
-                
-                # Only execute if quantity > 0 AND there's no skip_reason
-                if sized_stock_decision and sized_stock_decision.get('quantity', 0) > 0 and not sized_stock_decision.get('skip_reason'):
-                    # One more check on buying power before execution (even sells/covers require some BP)
-                    if portfolio_state.get('buying_power', 0) <= 0:
-                        logger.warning(f"Cancelling scale_out for {symbol}: No buying power available")
-                        management_actions[symbol] = {
-                            'action': 'skip_scale_out',
-                            'reason': 'No buying power available'
-                        }
-                        continue
-                        
-                    # Wrap for Alpaca execution function
-                    execution_input = {symbol: sized_stock_decision}
-                    result = self.alpaca.execute_trading_decisions(execution_input)
-                    management_actions[symbol] = {
-                        'action': 'scale_out',
-                        'result': result.get(symbol) # Use .get for safety
-                    }
-                elif sized_stock_decision:
-                     logger.info(f"Skipping scale_out execution for {symbol}. Reason: {sized_stock_decision.get('skip_reason', 'Quantity sized to zero')}")
-                    
-        return management_actions
-    
+            return execution_results
+        except Exception as e:
+            logger.exception(f"Error in position management: {e}")
+            return {
+                "status": "error",
+                "reason": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+
     def manage_stops_and_targets(self) -> Dict[str, Dict]:
         """
         Manage stop losses and take profit targets for positions.
-        Uses ATR trailing stops if enabled in config.
+        This functionality is now handled by the PositionManagementAgent.
         
         Returns:
             Dict with management actions taken.
         """
-        # Update portfolio state
-        self.update_portfolio_cache(force=True)
-        portfolio_state = self.get_portfolio_state()
+        # In the new architecture, stop loss and target management is integrated 
+        # into the general position management functionality.
+        # This method is kept for backwards compatibility.
         
-        management_actions = {}
-        
-        # Check if we have sufficient buying power to even consider trading
-        buying_power = portfolio_state.get('buying_power', 0)
-        if buying_power <= 0:
-            logger.warning(f"Stop/target management skipped: Insufficient buying power (${buying_power:.2f})")
-            return {'status': 'skipped', 'reason': 'Insufficient buying power'}
-        
-        # Only proceed if we have positions
-        # portfolio_state['positions'] is now a dict {symbol: position_dict}
-        if not portfolio_state.get('positions'):
-            return management_actions
-            
-        # Check stop and target conditions for each position dictionary (iterate over values)
-        for position in portfolio_state['positions'].values(): 
-            symbol = position['symbol']
-            side = position['side']
-            current_price = float(position['current_price'])
-            initial_stop_price = position.get('stop_price', 0) # The stop set at entry
-            target_price = position.get('target_price', 0)
-            profit_loss_pct = position.get('profit_loss_pct', 0.0)
-            qty = abs(int(position['qty']))
-            
-            stop_price_to_use = initial_stop_price
-            stop_reason = 'Initial stop loss triggered'
-            is_trailing_stop = False
+        return self.manage_positions()
 
-            # --- ATR Trailing Stop Logic ---
-            if self.config.get('enable_trailing_stops', False) and profit_loss_pct > 0:
-                atr = self._calculate_atr(symbol)
-                atr_multiplier = self.config.get('trailing_stop_atr_multiplier', 2.5)
-                
-                if atr > 0:
-                    trailing_stop_level = 0
-                    if side == 'long':
-                        # Trail below the current price
-                        trailing_stop_level = current_price - (atr * atr_multiplier)
-                        # Stop only moves up, never down
-                        stop_price_to_use = max(initial_stop_price, trailing_stop_level)
-                    else: # side == 'short'
-                        # Trail above the current price
-                        trailing_stop_level = current_price + (atr * atr_multiplier)
-                        # Stop only moves down, never up
-                        stop_price_to_use = min(initial_stop_price, trailing_stop_level)
-                    
-                    # Check if the effective stop is the trailing one
-                    if stop_price_to_use == trailing_stop_level and stop_price_to_use != initial_stop_price:
-                         is_trailing_stop = True
-                         stop_reason = f'ATR trailing stop triggered ({atr_multiplier}x ATR={atr:.2f})'
-            # --- End ATR Trailing Stop Logic ---
-            
-            # Check if stop hit using the determined stop price
-            stop_hit = (side == 'long' and current_price <= stop_price_to_use) or \
-                       (side == 'short' and current_price >= stop_price_to_use)
-            
-            # Check if target hit (original logic)
-            target_hit = (side == 'long' and current_price >= target_price) or \
-                         (side == 'short' and current_price <= target_price)
-            
-            if stop_hit:
-                # One more check on buying power before execution
-                if portfolio_state.get('buying_power', 0) <= 0:
-                    logger.warning(f"Cancelling stop loss for {symbol}: No buying power available")
-                    management_actions[symbol] = {
-                        'action': 'skip_stop_loss',
-                        'reason': 'No buying power available'
-                    }
-                    continue
-                
-                # Create stop loss order to exit position
-                action = 'sell' if side == 'long' else 'cover'
-                    
-                decision = {
-                    'action': action,
-                    'quantity': qty,  # Exit full position
-                    'confidence': 100,  # Maximum confidence for stop loss
-                    'reason': stop_reason # Use dynamic reason
-                }
-                
-                # Directly create sized_decisions structure
-                sized_decisions = {symbol: decision}
-
-                # Ensure quantity is positive before executing
-                if sized_decisions[symbol]['quantity'] > 0:
-                    try:
-                        result = self.alpaca.execute_trading_decisions(sized_decisions)
-                        management_actions[symbol] = {
-                            'action': 'stop_loss' + ('_trailing' if is_trailing_stop else ''),
-                            'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
-                        }
-                    except Exception as e:
-                        logger.error(f"Error executing stop loss for {symbol}: {e}")
-                        management_actions[symbol] = {
-                            'action': 'stop_loss_failed',
-                            'error': str(e)
-                        }
-                else:
-                    logger.warning(f"Stop loss for {symbol} resulted in zero quantity after calculation.")
-
-            elif target_hit:
-                # One more check on buying power before execution
-                if portfolio_state.get('buying_power', 0) <= 0:
-                    logger.warning(f"Cancelling take profit for {symbol}: No buying power available")
-                    management_actions[symbol] = {
-                        'action': 'skip_take_profit',
-                        'reason': 'No buying power available'
-                    }
-                    continue
-                
-                # Create take profit order to exit position or scale out
-                action = 'sell' if side == 'long' else 'cover'
-                
-                # Determine quantity (full exit or scale out)
-                exit_quantity = qty
-                if self.config.get('position_scaling', False): # Use .get for safety
-                    # Scale out with percentage of position
-                    exit_quantity = max(1, int(qty * self.config.get('scaling_size_pct', 0.5))) # Use .get and provide default
-
-                decision = {
-                    'action': action,
-                    'quantity': exit_quantity,
-                    'confidence': 90,  # High confidence for take profit
-                    'reason': 'Take profit triggered'
-                }
-                
-                # Directly create sized_decisions structure
-                sized_decisions = {symbol: decision}
-
-                # Ensure quantity is positive before executing
-                if sized_decisions[symbol]['quantity'] > 0:
-                    try:
-                        result = self.alpaca.execute_trading_decisions(sized_decisions)
-                        management_actions[symbol] = {
-                            'action': 'take_profit',
-                            'result': result.get(symbol, {'status': 'error', 'error': 'Execution result not found'}) # Add safety
-                        }
-                    except Exception as e:
-                        logger.error(f"Error executing take profit for {symbol}: {e}")
-                        management_actions[symbol] = {
-                            'action': 'take_profit_failed',
-                            'error': str(e)
-                        }
-                else:
-                    logger.warning(f"Take profit for {symbol} resulted in zero quantity after calculation.")
-                    
-        return management_actions
-                
     # --- Start: Options Portfolio Methods ---
     def get_options_portfolio_state(self) -> Dict[str, Any]:
         """
@@ -1288,30 +1025,58 @@ class PortfolioManager:
         """
         self.update_portfolio_cache(force=True)
 
-        # Filter options positions (typically start with 'O:')
+        # Create a reusable option symbol detection function like the one in position_management.py
+        def is_option_symbol(ticker: str) -> bool:
+            # Common option prefixes
+            if ticker.startswith(('O:', 'OPTION:')):
+                return True
+                
+            # Standard OCC format: AAPL230616C00170000
+            if re.match(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$", ticker):
+                return True
+                
+            # Format with underscores: AAPL_230616_C_170.00
+            if re.match(r"^[A-Z]{1,6}_\d{6}_[CP]_\d+\.\d+$", ticker):
+                return True
+                
+            # Format with spaces: AAPL 230616C170
+            if re.match(r"^[A-Z]{1,6} \d{6}[CP]\d+(\.\d+)?$", ticker):
+                return True
+                
+            # Format with dashes: AAPL-230616-C-170
+            if re.match(r"^[A-Z]{1,6}-\d{6}-[CP]-\d+(\.\d+)?$", ticker):
+                return True
+                
+            # Format with slashes: AAPL/230616/C/170
+            if re.match(r"^[A-Z]{1,6}/\d{6}/[CP]/\d+(\.\d+)?$", ticker):
+                return True
+                
+            return False
+            
+        # Filter options positions using our comprehensive check
         all_positions = self.portfolio_cache['positions']
-        options_positions = [p for p in all_positions if p['symbol'].startswith('O:')]
-
-        # Calculate options portfolio metrics
-        account = self.portfolio_cache['account']
-        portfolio_value = float(account['portfolio_value'])
-
-        # Calculate options exposure
-        options_market_value = sum(abs(float(p['market_value'])) for p in options_positions)
-        options_exposure_ratio = options_market_value / portfolio_value if portfolio_value > 0 else 0
-
-        # Enhance options positions with additional metrics
-        enhanced_options_positions = self._enhance_options_positions(options_positions)
-
+        options_positions = []
+        
+        for position in all_positions:
+            symbol = position['symbol']
+            # Use our comprehensive check to identify options
+            if is_option_symbol(symbol):
+                options_positions.append(position)
+        
+        # Log the options position count for debugging
+        logger.info(f"Found {len(options_positions)} option positions out of {len(all_positions)} total positions")
+        
+        # Process option positions with enhanced data
+        enhanced_positions = self._enhance_options_positions(options_positions)
+        
+        # Get options portfolio metrics
+        options_metrics = self._calculate_options_portfolio_metrics(enhanced_positions)
+        
         return {
-            'timestamp': datetime.now().isoformat(),
-            'portfolio_value': portfolio_value,
-            'options_market_value': options_market_value,
-            'options_exposure_ratio': options_exposure_ratio,
-            'positions': enhanced_options_positions,
-            'buying_power': float(account['buying_power']),
+            'positions': enhanced_positions,
+            'metrics': options_metrics
         }
-
+        
     def _enhance_options_positions(self, positions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
         Enhance options positions with additional metrics.
@@ -1329,66 +1094,46 @@ class PortfolioManager:
             entry_price = float(position['avg_entry_price'])
             current_price = float(position['current_price'])
             quantity = int(position['qty'])
-            side = position['side']
+            
+            # Handle short positions properly (negative quantity)
+            is_short = quantity < 0
+            side = 'short' if is_short else 'long'
+            position['side'] = side
+            
+            # Make quantity positive for calculations (abs), but preserve sign for operations
+            unsigned_quantity = abs(quantity)
 
-            # Extract option details from symbol (O:AAPL230616C00150000)
-            parts = symbol.split(':')
-            if len(parts) != 2:
-                continue
+            # If position already has option details, use them directly
+            if all(key in position for key in ['underlying', 'option_type', 'strike_price', 'expiration_date']):
+                # Position already has option details, continue with enhancement
+                pass
+            else:
+                # Extract option details from the symbol
+                try:
+                    # Try to parse OCC symbol format
+                    details = self._parse_option_symbol(symbol)
+                    if details:
+                        position.update(details)
+                except Exception as e:
+                    logger.warning(f"Error parsing option symbol {symbol}: {e}")
+                    # Set defaults for unparseable symbols
+                    position.setdefault('underlying', '')
+                    position.setdefault('option_type', '')
+                    position.setdefault('strike_price', 0.0)
+                    position.setdefault('expiration_date', '')
 
-            option_parts = parts[1]
-            try:
-                underlying = ''.join(c for c in option_parts if c.isalpha())
-                exp_date_str = option_parts[len(underlying):len(underlying) + 6]
-                exp_date = datetime.strptime(exp_date_str, '%y%m%d')
-                option_type = 'call' if 'C' in option_parts[len(underlying) + 6:] else 'put'
-                strike_str = option_parts[option_parts.find('C' if option_type == 'call' else 'P') + 1:]
-                strike_price = float(strike_str) / 1000  # Assuming format like 00150000 = $150.00
-            except Exception as e:
-                logging.error(f"Error parsing option symbol {symbol}: {e}")
-                continue
+            # Calculate profit/loss values - accounting for position direction
+            # For short positions, profit is when current_price < entry_price
+            unrealized_pl = (entry_price - current_price) * unsigned_quantity if is_short else (current_price - entry_price) * unsigned_quantity
+            unrealized_pl_percent = ((entry_price - current_price) / entry_price * 100) if is_short else ((current_price - entry_price) / entry_price * 100)
 
-            # Calculate days to expiration
-            now = datetime.now()
-            days_to_expiration = (exp_date - now).days + (exp_date - now).seconds / 86400.0
+            position['unrealized_pl'] = unrealized_pl
+            position['unrealized_pl_percent'] = unrealized_pl_percent
+            position['market_value'] = current_price * unsigned_quantity
+            position['cost_basis'] = entry_price * unsigned_quantity
 
-            # Calculate risk metrics
-            profit_loss_pct = ((current_price / entry_price) - 1) * 100 if side == 'long' else ((entry_price / current_price) - 1) * 100
-
-            # Get Greeks from Polygon (if available)
-            greeks = {
-                'delta': 0.0,
-                'gamma': 0.0,
-                'theta': 0.0,
-                'vega': 0.0,
-                'implied_volatility': 0.0
-            }
-
-            try:
-                # Import here to avoid circular imports
-                from src.integrations.polygon import PolygonClient
-                polygon_client = PolygonClient()
-                contract_details = polygon_client.get_option_contract_details(symbol)
-                greeks = {
-                    'delta': contract_details.delta,
-                    'gamma': contract_details.gamma,
-                    'theta': contract_details.theta,
-                    'vega': contract_details.vega,
-                    'implied_volatility': contract_details.implied_volatility
-                }
-            except Exception as e:
-                logging.warning(f"Could not fetch Greeks for {symbol}: {e}")
-
-            enhanced[symbol] = {
-                **position,
-                'underlying': underlying,
-                'expiration_date': exp_date.strftime('%Y-%m-%d'),
-                'option_type': option_type,
-                'strike_price': strike_price,
-                'days_to_expiration': days_to_expiration,
-                'profit_loss_pct': profit_loss_pct,
-                'greeks': greeks
-            }
+            # Add to enhanced positions
+            enhanced[symbol] = position
 
         return enhanced
 
@@ -1938,7 +1683,7 @@ class PortfolioManager:
         logger.info("Calling PortfolioSizerAgent...")
         try:
             # Pass the decisions that passed risk filtering (or None if they didn't exist initially)
-            sized_stock_decision, sized_option_decision = self.portfolio_sizer_agent.calculate_combined_sizes(
+            sized_stock_decision, sized_option_decision = self.portfolio_sizer.calculate_combined_sizes(
                 filtered_stock_decision if final_stock_action != 'hold' else None,
                 filtered_option_decision if final_option_action != 'none' else None,
                 portfolio_state,
@@ -2060,7 +1805,7 @@ class PortfolioManager:
         options_portfolio_state = self.get_options_portfolio_state()
         
         # Use the batch sizing method to determine quantities
-        sized_stock_decisions, sized_option_decisions = self.portfolio_sizer_agent.calculate_batch_sizes(
+        sized_stock_decisions, sized_option_decisions = self.portfolio_sizer.calculate_batch_sizes(
             stock_decisions=stock_decisions,
             option_decisions=option_decisions,
             portfolio_state=portfolio_state,
@@ -2112,3 +1857,133 @@ class PortfolioManager:
         # Return results
         logger.info(f"Batch execution complete. Executed {len(stock_execution_results)} stock trades and {len(option_execution_results)} option trades")
         return stock_execution_results, option_execution_results
+
+    def _parse_option_symbol(self, symbol: str) -> Dict[str, Any]:
+        """
+        Parse an option symbol into its components.
+        
+        Args:
+            symbol: Option symbol string
+            
+        Returns:
+            Dictionary with parsed option details or empty dict if parsing failed
+        """
+        try:
+            # Standard OCC format: AAPL230616C00170000
+            if re.match(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$", symbol):
+                match = re.match(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$", symbol)
+                if match:
+                    underlying, exp_date_str, cp, strike_str = match.groups()
+                    exp_date = datetime.strptime(exp_date_str, '%y%m%d')
+                    option_type = 'call' if cp == 'C' else 'put'
+                    strike_price = float(strike_str) / 1000  # Convert to dollars
+                    return {
+                        'underlying': underlying,
+                        'expiration_date': exp_date.strftime('%Y-%m-%d'),
+                        'option_type': option_type,
+                        'strike_price': strike_price,
+                        'days_to_expiration': (exp_date - datetime.now()).days
+                    }
+            
+            # With O: prefix format: O:AAPL230616C00150000
+            elif symbol.startswith('O:'):
+                parts = symbol.split(':')
+                if len(parts) == 2:
+                    option_parts = parts[1]
+                    # First extract all alphabetic characters for the underlying
+                    underlying = ''.join(c for c in option_parts if c.isalpha() and not c in ['C', 'P'])
+                    # Find where the date starts (after the ticker)
+                    date_start = len(underlying)
+                    # Extract date (6 digits)
+                    exp_date_str = option_parts[date_start:date_start + 6]
+                    exp_date = datetime.strptime(exp_date_str, '%y%m%d')
+                    # Determine option type
+                    option_type = 'call' if 'C' in option_parts[date_start + 6:] else 'put'
+                    # Extract strike price
+                    cp_index = option_parts.find('C' if option_type == 'call' else 'P')
+                    if cp_index != -1:
+                        strike_str = option_parts[cp_index + 1:]
+                        strike_price = float(strike_str) / 1000  # Assuming format like 00150000 = $150.00
+                    else:
+                        # If we can't find C or P, guess based on common formats
+                        strike_str = option_parts[date_start + 7:]
+                        strike_price = float(strike_str) / 1000
+                    return {
+                        'underlying': underlying,
+                        'expiration_date': exp_date.strftime('%Y-%m-%d'),
+                        'option_type': option_type,
+                        'strike_price': strike_price,
+                        'days_to_expiration': (exp_date - datetime.now()).days
+                    }
+            
+            # Format with underscores: AAPL_230616_C_170.00
+            elif re.match(r"^[A-Z]{1,6}_\d{6}_[CP]_\d+\.\d+$", symbol):
+                parts = symbol.split('_')
+                if len(parts) == 4:
+                    underlying = parts[0]
+                    exp_date_str = parts[1]
+                    cp = parts[2]
+                    strike_str = parts[3]
+                    exp_date = datetime.strptime(exp_date_str, '%y%m%d')
+                    option_type = 'call' if cp == 'C' else 'put'
+                    strike_price = float(strike_str)
+                    return {
+                        'underlying': underlying,
+                        'expiration_date': exp_date.strftime('%Y-%m-%d'),
+                        'option_type': option_type,
+                        'strike_price': strike_price,
+                        'days_to_expiration': (exp_date - datetime.now()).days
+                    }
+            
+        except Exception as e:
+            logger.warning(f"Error parsing option symbol {symbol}: {e}")
+        
+        # Return empty dict if we couldn't parse
+        return {}
+    
+    def _calculate_options_portfolio_metrics(self, positions: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Calculate portfolio-level metrics for options positions.
+        
+        Args:
+            positions: Dictionary of enhanced option positions
+            
+        Returns:
+            Dictionary with portfolio metrics
+        """
+        # Get account info from portfolio cache
+        account = self.portfolio_cache['account']
+        portfolio_value = float(account['portfolio_value'])
+        
+        # Calculate total metrics
+        total_market_value = sum(abs(float(p.get('market_value', 0))) for p in positions.values())
+        total_cost_basis = sum(abs(float(p.get('cost_basis', 0))) for p in positions.values())
+        
+        # Calculate profit/loss
+        total_unrealized_pl = sum(float(p.get('unrealized_pl', 0)) for p in positions.values())
+        
+        # Calculate exposure ratio
+        options_exposure_ratio = total_market_value / portfolio_value if portfolio_value > 0 else 0
+        
+        # Count types of positions
+        long_positions = sum(1 for p in positions.values() if p.get('side') == 'long')
+        short_positions = sum(1 for p in positions.values() if p.get('side') == 'short')
+        call_positions = sum(1 for p in positions.values() if p.get('option_type') == 'call')
+        put_positions = sum(1 for p in positions.values() if p.get('option_type') == 'put')
+        
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'portfolio_value': portfolio_value,
+            'options_market_value': total_market_value,
+            'options_cost_basis': total_cost_basis,
+            'options_unrealized_pl': total_unrealized_pl,
+            'options_exposure_ratio': options_exposure_ratio,
+            'buying_power': float(account['buying_power']),
+            'position_counts': {
+                'total': len(positions),
+                'long': long_positions,
+                'short': short_positions,
+                'calls': call_positions,
+                'puts': put_positions
+            }
+        }

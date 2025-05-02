@@ -29,8 +29,6 @@ class OptionsStrategy(BaseModel):
     """Model for an options trading strategy."""
     strategy_type: Literal[
         "long_call", "long_put", 
-        "covered_call", "cash_secured_put",
-        "bull_call_spread", "bear_put_spread", 
         "none"  # Keep 'none' for cases where no strategy is appropriate
     ]
     confidence: float = Field(description="Confidence in the strategy, between 0 and 100")
@@ -69,20 +67,6 @@ class OptionLeg(BaseModel):
     limit_price: Optional[float] = Field(description="Estimated limit price for this leg")
 
 
-# Define the model for a multi-leg (spread) decision
-class MultiLegOptionsDecision(BaseModel):
-    underlying_ticker: str = Field(description="The underlying stock ticker")
-    strategy: str = Field(description="The options strategy name (e.g., bull_call_spread)")
-    confidence: float = Field(description="Confidence in the decision (0-100)")
-    reasoning: str = Field(description="Reasoning for choosing this spread")
-    legs: List[OptionLeg] = Field(description="List of legs involved in the spread")
-    net_limit_price: Optional[float] = Field(description="Estimated net debit (positive) or credit (negative) for the spread")
-    stop_loss_on_underlying: Optional[float] = Field(description="Suggested underlying price for stop loss, if applicable")
-    take_profit_on_underlying: Optional[float] = Field(description="Suggested underlying price for take profit, if applicable")
-    # Add action field for consistency with single-leg and filtering logic
-    action: Literal["open_spread", "close_spread", "none"] = Field(default="open_spread", description="Overall action for the spread")
-
-
 class OptionsAnalysis(BaseModel):
     """Model for the overall options analysis output for a ticker."""
 
@@ -96,8 +80,9 @@ def options_analysis_agent(state: AgentState):
     2. Determines the best options strategy
     3. Fetches relevant options data from Polygon
     4. Analyzes contracts based on Greeks, liquidity, etc.
-    5. Selects optimal contracts for the strategy
-    6. Returns the final options trading decision
+    5. Analyzes current option positions
+    6. Selects optimal contracts for the strategy
+    7. Returns the final options trading decision
     """
     data = state["data"]
     # Extract relevant data from state
@@ -107,6 +92,17 @@ def options_analysis_agent(state: AgentState):
     
     # Initialize options decisions dictionary
     options_decisions = {}
+    
+    # Get current portfolio state for position analysis
+    try:
+        from src.portfolio.manager import PortfolioManager
+        portfolio_manager = PortfolioManager(config={})
+        current_portfolio = portfolio_manager.get_portfolio_state()
+        options_portfolio = portfolio_manager.get_options_portfolio_state()
+    except Exception as e:
+        logger.error(f"Error getting portfolio state: {e}")
+        current_portfolio = {"positions": {}}
+        options_portfolio = {"positions": {}}
     
     # Process each ticker with a stock decision
     for ticker in tickers:
@@ -132,12 +128,22 @@ def options_analysis_agent(state: AgentState):
             if ticker in signals
         }
         
-        # Determine options strategy using AI
+        # Get current positions for this underlying
+        current_stock_position = current_portfolio.get("positions", {}).get(ticker)
+        # Find options positions related to this underlying
+        current_option_positions = {}
+        for option_symbol, position in options_portfolio.get("positions", {}).items():
+            if position.get("underlying") == ticker:
+                current_option_positions[option_symbol] = position
+        
+        # Determine options strategy using AI, passing current positions
         progress.update_status("options_analysis_agent", ticker, "Determining options strategy")
         options_strategy = determine_options_strategy(
             ticker=ticker,
             stock_decision=stock_decision,
             analyst_signals=ticker_signals,
+            current_stock_position=current_stock_position,
+            current_option_positions=current_option_positions,
             model_name=state["metadata"]["model_name"],
             model_provider=state["metadata"]["model_provider"],
         )
@@ -187,7 +193,8 @@ def options_analysis_agent(state: AgentState):
             ticker=ticker,
             stock_decision=stock_decision,
             options_strategy=options_strategy,
-            filtered_contracts_or_pairs=filtered_contracts,
+            filtered_contracts=filtered_contracts,
+            current_option_positions=current_option_positions,
             model_name=state["metadata"]["model_name"],
             model_provider=state["metadata"]["model_provider"],
         )
@@ -226,16 +233,21 @@ def determine_options_strategy(
     ticker: str,
     stock_decision: Dict[str, Any],
     analyst_signals: Dict[str, Dict[str, Any]],
+    current_stock_position: Optional[Dict[str, Any]],
+    current_option_positions: Dict[str, Dict[str, Any]],
     model_name: str,
     model_provider: str,
 ) -> OptionsStrategy:
     """
-    Use LLM to determine the best options strategy based on stock decision and analyst signals.
+    Use LLM to determine the best options strategy based on stock decision, analyst signals,
+    and current positions.
     
     Args:
         ticker: Stock ticker
         stock_decision: Stock trading decision
         analyst_signals: Analyst signals for the ticker
+        current_stock_position: Current stock position (if exists)
+        current_option_positions: Current option positions for this underlying
         model_name: LLM model name
         model_provider: LLM provider
         
@@ -248,25 +260,22 @@ def determine_options_strategy(
             "system",
             """You are an options trading strategist with deep expertise in derivatives analysis.
             
-            Your task is to analyze a stock trading decision and corresponding analyst signals to determine the MOST APPROPRIATE options strategy.
+            Your task is to analyze a stock trading decision, corresponding analyst signals, and current positions to determine the MOST APPROPRIATE options strategy.
             
             Consider the following factors:
             1. The stock trading decision (buy, sell, short, cover)
             2. The confidence level of the decision
             3. The collective signals from various analysts
-            4. The volatility implications
-            5. Risk/reward balance
-            6. Time horizon implications
+            4. Current stock and options positions
+            5. The volatility implications
+            6. Risk/reward balance
+            7. Time horizon implications
             
             If the signals are contradictory or unclear, or if options simply aren't appropriate, return "none" as the strategy_type.
             
             Available strategy types:
             - "long_call": Buy call options (bullish outlook, defined risk, leverage)
             - "long_put": Buy put options (bearish outlook, defined risk, leverage)
-            - "covered_call": Sell call against owned stock (income strategy, reduced upside)
-            - "cash_secured_put": Sell put secured by cash (income strategy, potential acquisition)
-            - "bull_call_spread": Buy lower strike call, sell higher strike call (bullish, defined risk/reward)
-            - "bear_put_spread": Buy higher strike put, sell lower strike put (bearish, defined risk/reward)
             - "none": No options strategy appropriate
             
             IMPORTANT: If the confidence level is below 60%, default to "none" as the options strategy, as the certainty isn't high enough to warrant options exposure.
@@ -285,7 +294,7 @@ def determine_options_strategy(
         ),
         (
             "human",
-            """Here is the stock trading decision and analyst signals for ticker {ticker}:
+            """Here is the stock trading decision, analyst signals, and current positions for ticker {ticker}:
             
             Stock Decision:
             ```json
@@ -297,9 +306,19 @@ def determine_options_strategy(
             {analyst_signals}
             ```
             
+            Current Stock Position:
+            ```json
+            {current_stock_position}
+            ```
+            
+            Current Option Positions:
+            ```json
+            {current_option_positions}
+            ```
+            
             Determine the optimal options strategy for this scenario and return a strategy recommendation in this exact JSON format:
             {{
-                "strategy_type": "long_call|long_put|covered_call|cash_secured_put|bull_call_spread|bear_put_spread|none",
+                "strategy_type": "long_call|long_put|none",
                 "confidence": float between 0 and 100,
                 "reasoning": "string with detailed explanation",
                 "max_days_to_expiration": integer (recommended DTE),
@@ -316,7 +335,9 @@ def determine_options_strategy(
     prompt = template.invoke({
         "ticker": ticker,
         "stock_decision": json.dumps(stock_decision, indent=2),
-        "analyst_signals": json.dumps(analyst_signals, indent=2)
+        "analyst_signals": json.dumps(analyst_signals, indent=2),
+        "current_stock_position": json.dumps(current_stock_position, indent=2) if current_stock_position else "null",
+        "current_option_positions": json.dumps(current_option_positions, indent=2)
     })
     
     # Define default strategy
@@ -348,107 +369,79 @@ def select_optimal_contract(
     ticker: str,
     stock_decision: Dict[str, Any],
     options_strategy: OptionsStrategy,
-    filtered_contracts_or_pairs: Union[List[OptionContract], List[Tuple[OptionContract, OptionContract]]],
+    filtered_contracts: List[OptionContract],
+    current_option_positions: Dict[str, Dict[str, Any]],
     model_name: str,
     model_provider: str,
 ) -> Optional[Dict[str, Any]]:
     """
-    Select the optimal options contract or spread from filtered candidates.
+    Select the optimal options contract from filtered candidates.
     
     Args:
         ticker: Stock ticker
         stock_decision: Stock trading decision
         options_strategy: Options strategy determination
-        filtered_contracts_or_pairs: List of filtered option contracts or pairs
+        filtered_contracts: List of filtered option contracts
+        current_option_positions: Current option positions for this underlying
         model_name: LLM model name
         model_provider: LLM provider
         
     Returns:
-        Dictionary representing the final decision (either single leg or multi-leg)
+        Dictionary representing the final decision
     """
-    if not filtered_contracts_or_pairs:
+    if not filtered_contracts:
         return None
-        
-    # Determine if we are dealing with single contracts or pairs
-    is_spread_strategy = options_strategy.strategy_type in ["bull_call_spread", "bear_put_spread"]
-    is_pair_list = isinstance(filtered_contracts_or_pairs[0], tuple) if filtered_contracts_or_pairs else False
-
-    if is_spread_strategy and not is_pair_list:
-        logger.error(f"Strategy {options_strategy.strategy_type} requires pairs, but received single contracts.")
-        return None
-    elif not is_spread_strategy and is_pair_list:
-        logger.error(f"Strategy {options_strategy.strategy_type} expects single contracts, but received pairs.")
-        return None
-
-    # Prepare contract data for LLM based on single or pair structure
-    contracts_data_for_llm = []
-    if is_pair_list:
-        for long_leg, short_leg in filtered_contracts_or_pairs:
-            contracts_data_for_llm.append({
-                "long_leg": long_leg.model_dump(exclude_none=True),
-                "short_leg": short_leg.model_dump(exclude_none=True),
-                "net_debit_credit_estimate": abs(long_leg.last_price - short_leg.last_price) # Simple estimate
-            })
-    else: # Single contracts
-        for contract in filtered_contracts_or_pairs:
-            contracts_data_for_llm.append(contract.model_dump(exclude_none=True))
     
-    # --- Prompt Setup --- 
-    # Adjust system prompt based on single vs spread
+    # Prepare contract data for LLM
+    contracts_data_for_llm = []
+    for contract in filtered_contracts:
+        contracts_data_for_llm.append(contract.model_dump(exclude_none=True))
+    
+    # System prompt for contract selection
     system_prompt = """You are an options trading expert specializing in contract selection.
 
-For SPREAD strategies (like Bull Call Spread, Bear Put Spread):
-- Analyze the provided pairs (long leg, short leg).
-- Evaluate the net debit/credit, max profit/loss, and breakeven point for each pair.
-- Consider the spread width relative to volatility and target price.
-- Select the pair that offers the best risk/reward profile aligned with the strategy.
-- The final JSON should represent the chosen SPREAD, including details for BOTH legs.
+Analyze the provided option contracts to select the one that best aligns with the determined strategy.
+Consider the following factors:
+1. Delta alignment with the ideal_delta from the strategy
+2. Balance between time decay (theta) and time to expiration
+3. Implied volatility relative to historical volatility
+4. Liquidity and bid-ask spread
+5. Risk-reward profile given the target price
+6. Current option positions (avoid duplicate strategies, consider closing or adjusting existing positions)
+
+For existing positions, consider:
+- If they align with the current strategy, recommend holding or adjusting
+- If they contradict the current strategy, consider closing positions
+- Look for opportunities to average down cost basis or take profits on winning positions
+
 """
 
-    if is_spread_strategy:
-        candidate_data_header = "Candidate Spreads (Pairs)"
-        selection_type = "spread pair"
-        # Define the desired MULTI-LEG output format more clearly
-        output_format_instruction = ("""Select the best pair based on risk/reward and strategy alignment.
-Return ONLY the JSON object representing the chosen spread, adhering strictly to this format:
+    template = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human",
+         """Here is the stock trading decision, options strategy, current positions, and candidate contracts for ticker {ticker}:
 
+Stock Decision:
 ```json
-{{
-    "underlying_ticker": "{ticker}",
-    "strategy": "{strategy_type}",
-    "confidence": <float between 0 and 100>,
-    "reasoning": "Detailed explanation for choosing this spread.",
-    "legs": [
-        {{
-            "ticker": "<O:TICKER...>",
-            "action": "buy",
-            "option_type": "call" or "put",
-            "strike_price": <float>,
-            "limit_price": <float> // Estimated limit price for this leg
-        }},
-        {{
-            "ticker": "<O:TICKER...>",
-            "action": "sell",
-            "option_type": "call" or "put",
-            "strike_price": <float>,
-            "limit_price": <float> // Estimated limit price for this leg
-        }}
-    ],
-    "net_limit_price": <float or null>, // Estimated net debit (positive) or credit (negative)
-    "stop_loss_on_underlying": <float or null>,
-    "take_profit_on_underlying": <float or null>
-}}
+{stock_decision}
 ```
 
-IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object. Use the actual calculated or estimated values where indicated by `<...>`. Ensure `legs` is a list containing exactly two dictionaries, one for the buy leg and one for the sell leg. Verify correct brace placement.
-""")
-        pydantic_model_for_llm = MultiLegOptionsDecision # Use a new Pydantic model for spreads
+Options Strategy:
+```json
+{options_strategy}
+```
 
-    else: # Single leg
-        candidate_data_header = "Filtered Contracts"
-        selection_type = "contract"
-        # Define the SINGLE-LEG output format (existing format) more clearly
-        output_format_instruction = ("""Select the single best contract based on risk/reward and strategy alignment.
+Current Option Positions:
+```json
+{current_option_positions}
+```
+
+Filtered Contracts:
+```json
+{contracts_data}
+```
+
+Select the single best contract based on risk/reward and strategy alignment.
 Return ONLY the JSON object representing the chosen contract, adhering strictly to this format:
 
 ```json
@@ -474,34 +467,7 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
 }}
 ```
 
-IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object. Use the actual values where indicated by `<...>` Verify correct brace placement.
-""")
-        pydantic_model_for_llm = OptionsContractDecision # Use existing model for single leg
-
-    # Create the full prompt
-    # Combine system prompt and human prompt parts into the template
-    # Note: Langchain templates handle parameter formatting
-    template = ChatPromptTemplate.from_messages([
-        ("system", system_prompt), # General instructions + specific format rules based on strategy type
-        ("human",
-         """Here is the stock trading decision, options strategy, and candidate {candidate_data_header} for ticker {ticker}:
-
-Stock Decision:
-```json
-{stock_decision}
-```
-
-Options Strategy:
-```json
-{options_strategy}
-```
-
-{candidate_data_header}:
-```json
-{contracts_data}
-```
-
-{output_format_instruction}
+IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object.
 """)
     ])
     
@@ -509,11 +475,9 @@ Options Strategy:
         "ticker": ticker,
         "stock_decision": json.dumps(stock_decision, indent=2),
         "options_strategy": json.dumps(options_strategy.model_dump(), indent=2),
-        "candidate_data_header": candidate_data_header,
+        "current_option_positions": json.dumps(current_option_positions, indent=2),
         "contracts_data": json.dumps(contracts_data_for_llm, indent=2, default=str),
-        "selection_type": selection_type,
-        "strategy_type": options_strategy.strategy_type,
-        "output_format_instruction": output_format_instruction
+        "strategy_type": options_strategy.strategy_type
     })
     
     # Define default contract decision factory
@@ -521,12 +485,12 @@ Options Strategy:
         logger.error(f"LLM call failed in select_optimal_contract for {ticker}. Returning None.")
         return None
     
-    # Use LLM to select the optimal contract/spread
+    # Use LLM to select the optimal contract
     llm_result = call_llm(
         prompt=prompt,
         model_name=model_name,
         model_provider=model_provider,
-        pydantic_model=pydantic_model_for_llm, # Use the dynamically chosen model
+        pydantic_model=OptionsContractDecision,
         agent_name="options_contract_selection_agent",
         default_factory=create_default_decision,
     )
@@ -535,12 +499,6 @@ Options Strategy:
     if llm_result:
         # Convert to dictionary
         result_dict = llm_result.model_dump()
-        
-        # For multi-leg strategies, set the 'action' field to 'open_spread'
-        # This ensures filtering doesn't skip it due to missing 'action'
-        if is_spread_strategy:
-            result_dict['action'] = 'open_spread'
-            
         return result_dict
     else:
         return None

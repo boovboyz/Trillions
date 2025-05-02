@@ -73,7 +73,11 @@ def check_env_setup():
 from src.integrations.alpaca import get_alpaca_client
 from src.portfolio.manager import PortfolioManager
 from src.main import run_hedge_fund
-from src.utils.display import print_trading_output, print_execution_summary, print_portfolio_status, print_options_analysis_summary
+from src.utils.display import (
+    print_trading_output, print_execution_summary, 
+    print_portfolio_status, print_options_analysis_summary,
+    print_position_management_summary
+)
 from src.utils.analysts import ANALYST_ORDER
 from src.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelProvider
 from src.utils.ollama import ensure_ollama_and_model
@@ -124,7 +128,7 @@ class TradingManager:
         trading_frequency: str = "daily",
         market_hours_only: bool = True,
         paper: bool = True,
-        position_management_interval: int = 15,  # minutes
+        position_management_interval: int = 15,  # minutes (No longer used for scheduling, but kept for context)
         max_position_size_pct: float = 0.20,
         stop_loss_pct: float = 0.05,
         profit_target_pct: float = 0.15,
@@ -144,7 +148,7 @@ class TradingManager:
             trading_frequency: How often to run the trading logic ("daily", "hourly").
             market_hours_only: Whether to trade only during market hours.
             paper: Whether to use paper trading (True) or live trading (False).
-            position_management_interval: How often to check positions in minutes.
+            position_management_interval: (Informational) How often to check positions in minutes.
             max_position_size_pct: Maximum position size as a percentage of portfolio.
             stop_loss_pct: Default stop loss percentage.
             profit_target_pct: Default profit target percentage.
@@ -160,7 +164,7 @@ class TradingManager:
         self.trading_frequency = trading_frequency
         self.market_hours_only = market_hours_only
         self.paper = paper
-        self.position_management_interval = position_management_interval
+        self.position_management_interval = position_management_interval # Keep for reference
         self.show_reasoning = show_reasoning
         
         # Initialize Alpaca client
@@ -199,6 +203,7 @@ class TradingManager:
         self.last_trading_run = None
         self.running = False
         self.next_scheduled_run = None
+        self.pending_pos_mgmt_time = None # Time to run next position management cycle
         
         # Store access to utils module for display functions
         from src.utils import display as display_module
@@ -236,9 +241,7 @@ class TradingManager:
             next_run = schedule.next_run()
             self.next_scheduled_run = next_run
             
-            # Also schedule position management more frequently
-            for minute in range(0, 60, self.position_management_interval):
-                schedule.every().hour.at(f":{minute:02d}").do(self.run_position_management)
+            # Position management is now scheduled dynamically after trading cycle
             
         elif self.trading_frequency == "hourly":
             # Schedule hourly trading during market hours
@@ -251,10 +254,7 @@ class TradingManager:
             next_run = schedule.next_run()
             self.next_scheduled_run = next_run
             
-            # Also schedule position management more frequently
-
-            for minute in range(0, 60, self.position_management_interval):
-                schedule.every().hour.at(f":{minute:02d}").do(self.run_position_management)
+            # Position management is now scheduled dynamically after trading cycle
         
         # Run trading cycle immediately if requested
         if questionary.confirm(
@@ -268,7 +268,14 @@ class TradingManager:
         # Run the scheduler loop
         try:
             while self.running:
-                schedule.run_pending()
+                schedule.run_pending() # Check for scheduled trading cycles
+                
+                # Check if position management needs to run
+                if self.pending_pos_mgmt_time and datetime.now() >= self.pending_pos_mgmt_time:
+                    logger.info("Running dynamically scheduled position management cycle.")
+                    self.run_position_management()
+                    self.pending_pos_mgmt_time = None # Reset pending time
+                    
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Trading Manager stopped by user.")
@@ -289,6 +296,7 @@ class TradingManager:
         3. Run Options analysis (if enabled)
         4. Execute combined decisions (stock & options) via PortfolioManager
         5. Log results
+        6. Schedule position management to run after a delay
         
         Returns:
             Dict with results of the trading cycle.
@@ -320,6 +328,7 @@ class TradingManager:
                 else:
                     logger.error("Error checking market status: %s", str(e))
         
+        cycle_result = None # Initialize cycle result
         try:
             # Update last run time
             self.last_trading_run = datetime.now()
@@ -400,6 +409,8 @@ class TradingManager:
             if not stock_decisions and not options_decisions:
                 logger.info("No stock or option decisions generated. Nothing to execute.")
                 combined_execution_results = {}
+                stock_execution_results = {}
+                option_execution_results = {}
             else:
                 # Prepare the stock and option decisions for batch processing
                 stock_decisions_for_batch = {}
@@ -485,7 +496,7 @@ class TradingManager:
                 }
                 
                 # Save results
-                result = {
+                cycle_result = {
                     'timestamp': datetime.now().isoformat(),
                     'status': 'completed',
                     'tickers': self.tickers,
@@ -497,15 +508,14 @@ class TradingManager:
                     'performance': performance
                 }
                 
-                self._save_results(result)
-                return result
+                self._save_results(cycle_result)
                 
             except Exception as e:
                 logger.error("Error getting final portfolio state: %s", str(e))
                 traceback.print_exc()
                 
                 # Still return partial results
-                return {
+                cycle_result = {
                     'timestamp': datetime.now().isoformat(),
                     'status': 'partial',
                     'tickers': self.tickers,
@@ -520,17 +530,26 @@ class TradingManager:
             logger.error("Error in trading cycle: %s", str(e))
             traceback.print_exc()
             
-            return {
+            cycle_result = {
                 'timestamp': datetime.now().isoformat(),
                 'status': 'error',
                 'error': str(e)
             }
+            
+        finally:
+            # Schedule position management to run 3 minutes after this cycle finishes
+            if cycle_result and cycle_result['status'] != 'skipped':
+                delay_minutes = 3
+                run_time = datetime.now() + timedelta(minutes=delay_minutes)
+                self.pending_pos_mgmt_time = run_time
+                logger.info(f"Trading cycle finished. Scheduling position management to run at {run_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+        return cycle_result
     
     def run_position_management(self):
         """
         Run position management cycle:
-        1. Check and update stops/targets
-        2. Scale in/out as needed
+        Uses the PositionManagementAgent to analyze and execute.
         
         Returns:
             Dict with results of the position management cycle.
@@ -539,57 +558,57 @@ class TradingManager:
         
         # Check if market is open (if configured to trade only during market hours)
         if self.market_hours_only:
-            clock = self.alpaca.get_clock()
-            if not clock['is_open']:
-                logger.info("Market is closed. Skipping position management.")
+            try:
+                clock = self.alpaca.get_clock()
+                if not clock['is_open']:
+                    logger.info("Market is closed. Skipping position management.")
+                    return {
+                        "status": "skipped",
+                        "reason": "Market is closed",
+                        "timestamp": datetime.now().isoformat()
+                    }
+            except Exception as e:
+                logger.error(f"Error checking market status for position management: {e}")
                 return {
-                    "status": "skipped",
-                    "reason": "Market is closed",
+                    "status": "error",
+                    "reason": f"Failed to check market status: {str(e)}",
                     "timestamp": datetime.now().isoformat()
                 }
         
+        execution_results = None # Initialize
         try:
-            # Manage stops and targets
-            stop_actions = self.portfolio_manager.manage_stops_and_targets()
+            # Use the PositionManagementAgent
+            model_name = self.model_name # Reuse main model for now
+            model_provider = self.model_provider
             
-            # Manage positions (scaling in/out)
-            position_actions = self.portfolio_manager.manage_positions()
+            management_result = self.portfolio_manager.position_manager.manage_positions(
+                model_name=model_name,
+                model_provider=model_provider
+            )
             
-            # Manage options positions if enabled
-            options_management_actions = {}
-            if self.portfolio_manager.config.get('enable_options', True):
-                try:
-                    options_management_actions = self.portfolio_manager.manage_options_positions()
-                    
-                    # Log results if any actions were taken
-                    if options_management_actions:
-                        logger.info("Options position management actions: %s", 
-                                    json.dumps(options_management_actions, default=json_serial))
-                except Exception as e:
-                    logger.error(f"Error in options position management: {e}")
-                    traceback.print_exc()
+            # Execute actions
+            execution_results = self.portfolio_manager.position_manager.execute_management_actions(management_result)
             
             # Log results
-            if stop_actions or position_actions or options_management_actions:
+            if execution_results:
                 logger.info("Position management actions taken: %s", 
-                            json.dumps({
-                                "stops": stop_actions, 
-                                "positions": position_actions,
-                                "options": options_management_actions
-                            }, default=json_serial))
+                            json.dumps(execution_results, default=json_serial))
+                # Print the summary table
+                print_position_management_summary(execution_results)
             else:
-                logger.info("No position management actions needed")
+                logger.info("No position management actions needed or executed")
             
             return {
                 "status": "completed",
                 "timestamp": datetime.now().isoformat(),
-                "stop_actions": stop_actions,
-                "position_actions": position_actions,
-                "options_management_actions": options_management_actions
+                "actions_executed": execution_results
             }
             
         except Exception as e:
             logger.exception("Error in position management cycle: %s", str(e))
+            # Also print the summary table if there were partial results before the error
+            if execution_results:
+                 print_position_management_summary(execution_results)
             return {
                 "status": "error",
                 "reason": str(e),
