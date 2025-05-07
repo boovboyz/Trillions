@@ -91,7 +91,7 @@ class PositionManagementAgent:
             # Log position count to help with debugging
             stock_count = len(portfolio_state.get('positions', {}))
             options_count = len(options_portfolio_state.get('positions', {}))
-            self.logger.info(f"Retrieved portfolio state: {stock_count} stock positions, {options_count} option positions")
+            self.logger.info(f"Found {options_count} option positions out of {stock_count} total positions")
         except Exception as e:
             self.logger.error(f"Error getting portfolio state: {e}", exc_info=True)
             return {"error": f"Failed to get portfolio state: {str(e)}"}

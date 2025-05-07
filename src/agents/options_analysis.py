@@ -33,12 +33,46 @@ class OptionsStrategy(BaseModel):
     ]
     confidence: float = Field(description="Confidence in the strategy, between 0 and 100")
     reasoning: str = Field(description="Reasoning for the strategy selection")
-    max_days_to_expiration: int = Field(description="Maximum days to expiration to consider")
-    ideal_delta: float = Field(description="Ideal delta value to target")
-    price_target: Optional[float] = Field(description="Price target for the underlying asset")
-    stop_loss_percentage: float = Field(description="Stop loss percentage for risk management")
-    take_profit_percentage: float = Field(description="Take profit percentage for risk management")
-    max_position_size_pct: float = Field(description="Maximum position size as percentage of portfolio")
+    max_days_to_expiration: Optional[int] = Field(
+        description="Maximum days to expiration to consider",
+        default=30  # Default value used when None is provided
+    )
+    ideal_delta: Optional[float] = Field(
+        description="Ideal delta value to target",
+        default=0.5  # Default value used when None is provided
+    )
+    price_target: Optional[float] = Field(
+        description="Price target for the underlying asset",
+        default=None
+    )
+    stop_loss_percentage: Optional[float] = Field(
+        description="Stop loss percentage for risk management",
+        default=0.15  # Default value used when None is provided
+    )
+    take_profit_percentage: Optional[float] = Field(
+        description="Take profit percentage for risk management",
+        default=0.25  # Default value used when None is provided
+    )
+    max_position_size_pct: Optional[float] = Field(
+        description="Maximum position size as percentage of portfolio",
+        default=0.05  # Default value used when None is provided
+    )
+    
+    def __init__(self, **data):
+        # If strategy_type is "none", set default values for required fields
+        if data.get("strategy_type") == "none":
+            # Set default values for numeric fields if they're None
+            if data.get("max_days_to_expiration") is None:
+                data["max_days_to_expiration"] = 30
+            if data.get("ideal_delta") is None:
+                data["ideal_delta"] = 0.5
+            if data.get("stop_loss_percentage") is None:
+                data["stop_loss_percentage"] = 0.15
+            if data.get("take_profit_percentage") is None:
+                data["take_profit_percentage"] = 0.25
+            if data.get("max_position_size_pct") is None:
+                data["max_position_size_pct"] = 0.05
+        super().__init__(**data)
 
 
 class OptionsContractDecision(BaseModel):
@@ -328,6 +362,15 @@ def determine_options_strategy(
                 "take_profit_percentage": float,
                 "max_position_size_pct": float between 0 and 1
             }}
+            
+            IMPORTANT: If you select "none" as the strategy_type because no options strategy is appropriate, you must still include values for all fields. For numeric fields, use:
+            - max_days_to_expiration: 30
+            - ideal_delta: 0.5
+            - stop_loss_percentage: 0.15
+            - take_profit_percentage: 0.25
+            - max_position_size_pct: 0.05
+            
+            Do not return null values for these fields when strategy_type is "none".
             """
         )
     ])
@@ -349,8 +392,8 @@ def determine_options_strategy(
             max_days_to_expiration=30,
             ideal_delta=0.5,
             price_target=None,
-            stop_loss_percentage=0.25,
-            take_profit_percentage=0.5,
+            stop_loss_percentage=0.15,
+            take_profit_percentage=0.25,
             max_position_size_pct=0.05
         )
     
