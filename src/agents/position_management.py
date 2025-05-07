@@ -28,7 +28,7 @@ class PositionAction(BaseModel):
     action: str = Field(description="Action to take: scale_in, scale_out, stop_loss, take_profit, adjust_stop, adjust_target, hold")
     reason: str = Field(description="Reasoning for the action")
     confidence: float = Field(description="Confidence in the action (0-100)")
-    quantity: Optional[int] = Field(None, description="Quantity to trade (for scale in/out)")
+    quantity: Optional[int] = Field(None, description="Quantity to trade (for scale in/out). Must be an integer, not a decimal.")
     price_target: Optional[float] = Field(None, description="Price target (for adjustments)")
 
 class PositionManagementResult(BaseModel):
@@ -451,7 +451,7 @@ Each action should include:
 - action: One of the actions listed above
 - reason: Detailed explanation for the action
 - confidence: Confidence level (0-100)
-- quantity: Number of shares/contracts (for scale_in or scale_out)
+- quantity: Number of shares/contracts (for scale_in or scale_out) - MUST BE A WHOLE INTEGER, NOT A DECIMAL
 - price_target: Target price (for adjust_stop or adjust_target)
 """
             ),
@@ -487,7 +487,7 @@ Return a PositionManagementResult in this JSON format:
     "action": "scale_in|scale_out|stop_loss|take_profit|adjust_stop|adjust_target|hold",
     "reason": "Detailed explanation",
     "confidence": float between 0 and 100,
-    "quantity": integer or null,
+    "quantity": integer or null (must be whole numbers like 1, 2, 3 etc., not decimals like 0.3),
     "price_target": float or null
   }}
 ]}}
@@ -544,6 +544,23 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 self.logger.error(f"LLM call for position management of {ticker} returned None.")
                 return create_default_result()
             
+            # Validate result - ensure quantities are integers
+            if result.actions:
+                for action in result.actions:
+                    # If quantity is a float, convert it to an integer
+                    if action.quantity is not None and isinstance(action.quantity, float):
+                        position_qty = abs(int(position.get('qty', 0)))
+                        original_qty = action.quantity
+                        # If it's a fraction (< 1), interpret it as a percentage of the position
+                        if action.quantity < 1:
+                            # Calculate actual quantity based on percentage
+                            action.quantity = max(1, int(position_qty * action.quantity))
+                            self.logger.info(f"Converted fractional quantity {original_qty} to integer {action.quantity} for {ticker}")
+                        else:
+                            # Just round to the nearest integer
+                            action.quantity = int(action.quantity)
+                            self.logger.info(f"Rounded quantity {original_qty} to integer {action.quantity} for {ticker}")
+            
             return result
         
         except Exception as e:
@@ -564,7 +581,7 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
             Tuple of (is_valid, reason_message)
         """
         # Skip validation for hold/adjust_stop which don't execute trades
-        if action in ['hold', 'adjust_stop']:
+        if action in ['hold', 'adjust_stop', 'adjust_target']:
             return True, "Non-trading action"
             
         # Always validate these basic things regardless of position type
@@ -760,6 +777,31 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                             'action': 'adjust_stop',
                             'status': 'ERROR',
                             'message': f"No price target specified for adjust_stop on {ticker}",
+                            'details': None
+                        })
+                
+                elif action == 'adjust_target':
+                    # Handle target adjustment (update take profit targets in the system)
+                    price_target = action_dict.get('price_target')
+                    if price_target:
+                        # Execute the adjustment using the existing helper method
+                        result = self._execute_adjustment_action(
+                            ticker=ticker,
+                            action='adjust_target',
+                            price_target=price_target,
+                            reason=action_dict.get('reason', f"adjust_target set to {price_target} for {ticker}")
+                        )
+                        execution_results[ticker].append({
+                            'action': 'adjust_target',
+                            'status': result.get('status', 'ERROR'),
+                            'message': result.get('message', f"Target price adjustment for {ticker}"),
+                            'details': result.get('details')
+                        })
+                    else:
+                        execution_results[ticker].append({
+                            'action': 'adjust_target',
+                            'status': 'ERROR',
+                            'message': f"No price target specified for adjust_target on {ticker}",
                             'details': None
                         })
                         
