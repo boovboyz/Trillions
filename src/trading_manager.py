@@ -260,15 +260,17 @@ class TradingManager:
             # Position management is now scheduled dynamically after trading cycle
             
         elif self.trading_frequency == "hourly":
-            # Schedule hourly trading during market hours
-            for hour in range(9, 16):  # 9 AM to 3 PM
-                schedule.every().monday.at(f"{hour:02d}:31").do(self.run_trading_cycle)
-                schedule.every().tuesday.at(f"{hour:02d}:31").do(self.run_trading_cycle)
-                schedule.every().wednesday.at(f"{hour:02d}:31").do(self.run_trading_cycle)
-                schedule.every().thursday.at(f"{hour:02d}:31").do(self.run_trading_cycle)
-                schedule.every().friday.at(f"{hour:02d}:31").do(self.run_trading_cycle)
-            next_run = schedule.next_run()
-            self.next_scheduled_run = next_run
+            logger.info("Configuring hourly trading frequency.")
+            logger.info("Trading cycle will attempt to run approximately every hour.")
+            logger.info("The run_trading_cycle method itself checks for market hours before proceeding.")
+            
+            schedule.every(1).hour.do(self.run_trading_cycle)
+            
+            try:
+                self.next_scheduled_run = schedule.next_run()
+            except schedule.ScheduleError: 
+                self.next_scheduled_run = None
+                logger.warning("Could not determine the next scheduled run time for hourly frequency.")
             
             # Position management is now scheduled dynamically after trading cycle
         
