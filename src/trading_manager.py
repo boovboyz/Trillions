@@ -85,6 +85,8 @@ from src.utils.ollama import ensure_ollama_and_model
 from src.utils.progress import progress, console
 # Import cache control functions
 from src.data.cache import close_cache, get_cache, clear_cache
+# Import Supabase integration
+from src.integrations.supabase import get_supabase_client
 
 # Initialize colorama
 init(autoreset=True)
@@ -136,6 +138,7 @@ class TradingManager:
         enable_shorts: bool = True,
         enable_options: bool = True,  # Add options toggle
         show_reasoning: bool = False,
+        enable_supabase: bool = False,  # New parameter to enable/disable Supabase
     ):
         """
         Initialize the TradingManager.
@@ -156,6 +159,7 @@ class TradingManager:
             enable_shorts: Whether to allow short positions.
             enable_options: Whether to enable options trading.
             show_reasoning: Whether to show reasoning from the AI models.
+            enable_supabase: Whether to store data in Supabase.
         """
         self.tickers = tickers
         self.model_name = model_name
@@ -166,6 +170,7 @@ class TradingManager:
         self.paper = paper
         self.position_management_interval = position_management_interval # Keep for reference
         self.show_reasoning = show_reasoning
+        self.enable_supabase = enable_supabase
         
         # Initialize Alpaca client
         try:
@@ -208,6 +213,17 @@ class TradingManager:
         # Store access to utils module for display functions
         from src.utils import display as display_module
         self.utils = type('Utils', (), {'display': display_module})()
+        
+        # Initialize Supabase client if enabled
+        self.supabase_client = None
+        if self.enable_supabase:
+            try:
+                self.supabase_client = get_supabase_client()
+                logger.info("Supabase integration enabled for data storage")
+            except Exception as e:
+                logger.error(f"Failed to initialize Supabase client: {str(e)}")
+                print(f"\n{Fore.YELLOW}WARNING: Supabase initialization failed. Data will not be stored in Supabase. Error: {str(e)}{Style.RESET_ALL}")
+                self.enable_supabase = False
         
         logger.info("Trading Manager initialized with tickers: %s", tickers)
         
@@ -505,6 +521,7 @@ class TradingManager:
                     'stock_decisions': stock_decisions,
                     'options_decisions': options_decisions, 
                     'execution_results': combined_execution_results,
+                    'options_execution_results': option_execution_results,
                     'performance': performance
                 }
                 
@@ -523,8 +540,12 @@ class TradingManager:
                     'stock_decisions': stock_decisions,
                     'options_decisions': options_decisions,
                     'execution_results': combined_execution_results,
+                    'options_execution_results': option_execution_results,
                     'error': str(e)
                 }
+                
+                # Still save partial results
+                self._save_results(cycle_result)
                 
         except Exception as e:
             logger.error("Error in trading cycle: %s", str(e))
@@ -535,6 +556,9 @@ class TradingManager:
                 'status': 'error',
                 'error': str(e)
             }
+            
+            # Save even error results
+            self._save_results(cycle_result)
             
         finally:
             # Schedule position management to run 3 minutes after this cycle finishes
@@ -589,6 +613,17 @@ class TradingManager:
             # Execute actions
             execution_results = self.portfolio_manager.position_manager.execute_management_actions(management_result)
             
+            # Store in Supabase if enabled
+            if self.enable_supabase and self.supabase_client and execution_results:
+                try:
+                    supabase_result = self.supabase_client.store_position_management(execution_results)
+                    if supabase_result.get("status") == "success":
+                        logger.info(f"Position management data stored in Supabase. IDs: {supabase_result.get('stored_ids')}")
+                    else:
+                        logger.warning(f"Failed to store position management data in Supabase: {supabase_result.get('message')}")
+                except Exception as e:
+                    logger.error(f"Error storing position management data in Supabase: {str(e)}")
+            
             # Log results
             if execution_results:
                 logger.info("Position management actions taken: %s", 
@@ -617,7 +652,7 @@ class TradingManager:
     
     def _save_results(self, results):
         """
-        Save trading results to file.
+        Save trading results to file and Supabase (if enabled).
         
         Args:
             results: Dict with trading cycle results.
@@ -629,11 +664,22 @@ class TradingManager:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"results/trading_{timestamp}.json"
         
-        # Save results
+        # Save results to local file
         with open(filename, "w") as f:
             json.dump(results, f, indent=2, default=json_serial)
         
         logger.info("Results saved to %s", filename)
+        
+        # Store in Supabase if enabled
+        if self.enable_supabase and self.supabase_client:
+            try:
+                supabase_result = self.supabase_client.store_trading_cycle(results)
+                if supabase_result.get("status") == "success":
+                    logger.info(f"Trading cycle data stored in Supabase. Cycle ID: {supabase_result.get('cycle_id')}")
+                else:
+                    logger.warning(f"Failed to store trading cycle data in Supabase: {supabase_result.get('message')}")
+            except Exception as e:
+                logger.error(f"Error storing trading cycle data in Supabase: {str(e)}")
 
 
 def select_model():
@@ -746,6 +792,11 @@ def main():
         action="store_true", 
         help="Show reasoning from the AI models"
     )
+    parser.add_argument(
+        "--enable-supabase",
+        action="store_true",
+        help="Enable storing trading data in Supabase"
+    )
     
     args = parser.parse_args()
 
@@ -821,6 +872,7 @@ def main():
         enable_shorts=enable_shorts,
         enable_options=args.enable_options,
         show_reasoning=args.show_reasoning,
+        enable_supabase=args.enable_supabase,
     )
     
     manager.start()

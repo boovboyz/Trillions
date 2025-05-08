@@ -34,6 +34,7 @@ diskcache = "*"
 pandas-market-calendars = "^5.0.0"
 polygon-api-client = "^1.7.0"
 alpaca-py = "^0.40.0"
+requests = "^2.32.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
