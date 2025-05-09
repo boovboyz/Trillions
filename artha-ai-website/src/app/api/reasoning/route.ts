@@ -6,6 +6,14 @@ import { createClient } from '@supabase/supabase-js';
 // Ensure these are set in your .env.local file.
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!; // Use service role key for backend access
+
+// Added check for environment variables
+if (!supabaseUrl || !supabaseKey) {
+  console.error("Supabase URL or Key is missing. Check your .env.local file.");
+  // Optionally, you could return an error response here immediately
+  // return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
+}
+
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 interface StrategyItemBase {
@@ -63,6 +71,7 @@ interface FormattedReasoning {
 
 export async function GET(request: Request) {
   console.log('API route /api/reasoning called to fetch most recent analysis per ticker.');
+  console.log('Using Supabase URL:', supabaseUrl ? supabaseUrl.substring(0, supabaseUrl.indexOf('.supabase.co') + '.supabase.co'.length) : 'URL NOT LOADED');
 
   try {
     // Using Supabase RPC to execute a more complex query for DISTINCT ON
@@ -111,7 +120,7 @@ export async function GET(request: Request) {
       .rpc('get_latest_strategy_per_ticker');
 
     if (rpcError) {
-      console.error('Supabase RPC error for get_latest_strategy_per_ticker:', rpcError.message);
+      console.error('Supabase RPC error object for get_latest_strategy_per_ticker:', JSON.stringify(rpcError, null, 2));
       throw rpcError;
     }
 
@@ -143,9 +152,21 @@ export async function GET(request: Request) {
     return NextResponse.json(formattedReasoning.slice(0, 15));
 
   } catch (error: any) {
-    console.error('Error in /api/reasoning:', error.message || error);
+    console.error('Error in /api/reasoning. Full error object:', JSON.stringify(error, null, 2));
+    let errorMessage = 'Failed to fetch reasoning data from Supabase';
+    let errorDetails = error.toString();
+
+    if (error && error.message) {
+      errorMessage = error.message;
+    }
+    if (error && error.details) {
+      errorDetails = error.details;
+    } else if (error && error.stack) {
+      errorDetails = error.stack;
+    }
+
     return NextResponse.json(
-      { error: 'Failed to fetch reasoning data from Supabase', details: error.toString() },
+      { error: errorMessage, details: errorDetails, fullError: error }, // Sending more error info to client for debugging if needed
       { status: 500 }
     );
   }
