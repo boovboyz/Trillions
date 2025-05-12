@@ -39,7 +39,7 @@ export default async function handler(
     }
 
     try {
-      const { data: _data, error } = await supabaseAdmin
+      const { error } = await supabaseAdmin
         .from('contact_submissions')
         .insert([{ name, email, message }])
         .select(); // .select() is optional, but can be useful to confirm the insert

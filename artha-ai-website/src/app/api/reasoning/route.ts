@@ -25,18 +25,18 @@ interface StrategyItemBase {
   // analysts_involved will be tricky with this new approach, placeholder for now
 }
 
-interface StockStrategyItem extends StrategyItemBase {
-  item_type: 'Stock';
-  ticker: string;
-}
+// interface StockStrategyItem extends StrategyItemBase { // Removed unused interface
+//   item_type: 'Stock';
+//   ticker: string;
+// }
 
-interface OptionStrategyItem extends StrategyItemBase {
-  item_type: 'Option';
-  underlying_ticker: string;
-  option_ticker: string | null;
-  strategy: string | null; 
-  details: Record<string, unknown>; // Changed from any to Record<string, unknown>
-}
+// interface OptionStrategyItem extends StrategyItemBase { // Removed unused interface
+//   item_type: 'Option';
+//   underlying_ticker: string;
+//   option_ticker: string | null;
+//   strategy: string | null; 
+//   details: Record<string, unknown>; 
+// }
 
 // Combined type for Supabase RPC or view if we used one
 // type CombinedStrategyItem = StockStrategyItem | OptionStrategyItem;
@@ -155,7 +155,7 @@ export async function GET(_request: Request) {
     console.error('Error in /api/reasoning. Full error object:', JSON.stringify(e, null, 2));
     let errorMessage = 'Failed to fetch reasoning data from Supabase';
     let errorDetails = '';
-    let fullError: unknown = e;
+    const fullError: unknown = e;
 
     if (e instanceof Error) {
       errorMessage = e.message;
