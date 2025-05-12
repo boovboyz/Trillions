@@ -38,9 +38,13 @@ export default function PortfolioDisplay() {
         }
         const data: PortfolioData = await response.json();
         setPortfolioData(data);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("Error fetching portfolio:", err);
-        setError(err.message || 'An unexpected error occurred while fetching portfolio data.');
+        let message = 'An unexpected error occurred while fetching portfolio data.';
+        if (err instanceof Error) {
+          message = err.message;
+        }
+        setError(message);
       }
       setIsLoading(false);
     }

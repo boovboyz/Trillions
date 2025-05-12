@@ -29,9 +29,13 @@ export default function RecentTradesDisplay() {
         }
         const data: Trade[] = await response.json();
         setTrades(data);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("Error fetching recent trades:", err);
-        setError(err.message || 'An unexpected error occurred while fetching trades data.');
+        let message = 'An unexpected error occurred while fetching trades data.';
+        if (err instanceof Error) {
+          message = err.message;
+        }
+        setError(message);
       }
       setIsLoading(false);
     }

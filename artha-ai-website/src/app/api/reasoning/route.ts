@@ -35,11 +35,11 @@ interface OptionStrategyItem extends StrategyItemBase {
   underlying_ticker: string;
   option_ticker: string | null;
   strategy: string | null; 
-  details: any; // JSONB from schema for option details
+  details: Record<string, unknown>; // Changed from any to Record<string, unknown>
 }
 
 // Combined type for Supabase RPC or view if we used one
-type CombinedStrategyItem = StockStrategyItem | OptionStrategyItem;
+// type CombinedStrategyItem = StockStrategyItem | OptionStrategyItem;
 
 // This interface should match the structure returned by your SQL function
 interface RpcStrategyItem {
@@ -52,7 +52,7 @@ interface RpcStrategyItem {
   confidence: number | null;
   reasoning: string | null;
   strategy: string | null; // For options
-  details: any | null; // For options (JSONB)
+  details: Record<string, unknown> | null; // Changed from any to Record<string, unknown>
 }
 
 interface FormattedReasoning {
@@ -66,10 +66,10 @@ interface FormattedReasoning {
   analysts_involved: string[];
   confidence?: number | null;
   strategy?: string | null;
-  option_details?: any | null;
+  option_details?: Record<string, unknown> | null; // Changed from any to Record<string, unknown>
 }
 
-export async function GET(request: Request) {
+export async function GET(_request: Request) {
   console.log('API route /api/reasoning called to fetch most recent analysis per ticker.');
   console.log('Using Supabase URL:', supabaseUrl ? supabaseUrl.substring(0, supabaseUrl.indexOf('.supabase.co') + '.supabase.co'.length) : 'URL NOT LOADED');
 
@@ -151,22 +151,31 @@ export async function GET(request: Request) {
 
     return NextResponse.json(formattedReasoning.slice(0, 15));
 
-  } catch (error: any) {
-    console.error('Error in /api/reasoning. Full error object:', JSON.stringify(error, null, 2));
+  } catch (e: unknown) {
+    console.error('Error in /api/reasoning. Full error object:', JSON.stringify(e, null, 2));
     let errorMessage = 'Failed to fetch reasoning data from Supabase';
-    let errorDetails = error.toString();
+    let errorDetails = '';
+    let fullError: unknown = e;
 
-    if (error && error.message) {
-      errorMessage = error.message;
-    }
-    if (error && error.details) {
-      errorDetails = error.details;
-    } else if (error && error.stack) {
-      errorDetails = error.stack;
+    if (e instanceof Error) {
+      errorMessage = e.message;
+      errorDetails = e.stack || e.toString();
+    } else if (typeof e === 'object' && e !== null) {
+      errorMessage = (e as { message?: string }).message || errorMessage;
+      // Attempt to get more detailed error information if available
+      if ('details' in e && typeof (e as {details: unknown}).details === 'string') {
+        errorDetails = (e as {details: string}).details;
+      } else if ('stack' in e && typeof (e as {stack: unknown}).stack === 'string') {
+        errorDetails = (e as {stack: string}).stack;
+      } else {
+        errorDetails = JSON.stringify(e);
+      }
+    } else {
+      errorDetails = String(e);
     }
 
     return NextResponse.json(
-      { error: errorMessage, details: errorDetails, fullError: error }, // Sending more error info to client for debugging if needed
+      { error: errorMessage, details: errorDetails, fullError: fullError }, 
       { status: 500 }
     );
   }

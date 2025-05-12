@@ -1,11 +1,8 @@
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import type { Metadata } from "next";
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import { Inter, Outfit } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/Navbar"; // Assuming @ is configured for src
 import Footer from "@/components/Footer"; // Or use relative paths like ../components/
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import React from "react";
 
 // Load fonts

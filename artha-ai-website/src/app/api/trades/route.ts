@@ -1,7 +1,20 @@
 import { NextResponse } from 'next/server';
 import Alpaca from '@alpacahq/alpaca-trade-api';
 
-export async function GET(request: Request) {
+// Define an interface for the Alpaca order object for type safety
+interface AlpacaOrder {
+  id: string;
+  symbol: string;
+  side: string; // e.g., 'buy', 'sell'
+  qty: string; // Quantity as a string, parsed to float later
+  filled_avg_price: string; // Filled average price as a string, parsed to float later
+  filled_at: string | null; // Timestamp as string, can be null
+  submitted_at: string; // Timestamp as string
+  status: string; // e.g., 'filled', 'open'
+  // Add other properties if accessed from the order object
+}
+
+export async function GET(_request: Request) {
   console.log('API route /api/trades called to fetch recent trades');
 
   // Mock data - in a real implementation, these would come from Alpaca
@@ -73,7 +86,7 @@ export async function GET(request: Request) {
       symbols: undefined // string | string[]
     });
 
-    const trades = orders.map((order: any) => ({
+    const trades = orders.map((order: AlpacaOrder) => ({
       id: order.id,
       ticker: order.symbol,
       type: order.side,
@@ -84,12 +97,31 @@ export async function GET(request: Request) {
     }));
 
     return NextResponse.json(trades);
-  } catch (error: any) {
-    console.error('Error fetching trades from Alpaca:', error.message || error);
-    const errorMessage = error.message || 'Failed to fetch trades data from Alpaca';
-    const errorStatus = error.statusCode || 500;
+  } catch (e: unknown) {
+    let errorMessage = 'Failed to fetch trades data from Alpaca';
+    let errorStatus = 500;
+    let errorDetails = '';
+
+    if (e instanceof Error) {
+      errorMessage = e.message;
+      errorDetails = e.toString();
+      // Check if the error object has a statusCode property
+      if ('statusCode' in e && typeof (e as { statusCode?: unknown }).statusCode === 'number') {
+        errorStatus = (e as { statusCode: number }).statusCode;
+      }
+    } else if (typeof e === 'object' && e !== null) {
+      // Attempt to extract message and statusCode if it's a non-Error object
+      errorMessage = (e as { message?: string }).message || errorMessage;
+      errorStatus = (e as { statusCode?: number }).statusCode || errorStatus;
+      errorDetails = String(e);
+    } else {
+      // Fallback for other types of errors
+      errorDetails = String(e);
+    }
+    console.error('Error fetching trades from Alpaca:', errorMessage, errorDetails);
+
     return NextResponse.json(
-      { error: errorMessage, details: error.toString() },
+      { error: errorMessage, details: errorDetails },
       { status: errorStatus }
     );
   }

@@ -14,7 +14,7 @@ interface ReasoningItem {
   analysts_involved: string[];
   confidence?: number | null;
   strategy?: string | null;
-  option_details?: any | null;
+  option_details?: Record<string, unknown> | null;
 }
 
 // Helper to get an icon based on action
@@ -52,9 +52,13 @@ export default function ReasoningDisplay() {
           allowedTickers.includes(item.ticker.toUpperCase())
         );
         setReasoningData(filteredData);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("Error fetching reasoning:", err);
-        setError(err.message || 'An unexpected error occurred while fetching reasoning data.');
+        let message = 'An unexpected error occurred while fetching reasoning data.';
+        if (err instanceof Error) {
+          message = err.message;
+        }
+        setError(message);
       }
       setIsLoading(false);
     }

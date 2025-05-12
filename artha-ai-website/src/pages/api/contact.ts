@@ -39,7 +39,7 @@ export default async function handler(
     }
 
     try {
-      const { data, error } = await supabaseAdmin
+      const { data: _data, error } = await supabaseAdmin
         .from('contact_submissions')
         .insert([{ name, email, message }])
         .select(); // .select() is optional, but can be useful to confirm the insert
@@ -52,9 +52,13 @@ export default async function handler(
       // Successfully inserted
       return res.status(200).json({ message: 'Message sent successfully!' });
 
-    } catch (error: any) {
-      console.error('Handler error:', error);
-      return res.status(500).json({ error: error.message || 'An unexpected error occurred.' });
+    } catch (e: unknown) {
+      console.error('Handler error:', e);
+      let message = 'An unexpected error occurred.';
+      if (e instanceof Error) {
+        message = e.message;
+      }
+      return res.status(500).json({ error: message });
     }
   } else {
     // Handle any other HTTP method

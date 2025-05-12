@@ -1,9 +1,7 @@
 'use client';
 
-// @ts-ignore - Add TypeScript ignore to suppress JSX errors
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 // Import icons from lucide-react
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import { TrendingUp, ShieldCheck, MessageSquareText, BrainCircuit, Bot, Network, Scale, Activity, RefreshCw, ArrowRight, ChevronDown } from 'lucide-react';
 import PortfolioDisplay from '@/components/PortfolioDisplay';
 import ReasoningDisplay from '@/components/ReasoningDisplay';
@@ -28,7 +26,7 @@ const features = [
   {
     icon: MessageSquareText, // Icon for transparency/reasoning
     title: "Transparent AI Reasoning",
-    description: "Gain confidence with clear explanations for every trade, understanding the \"why\" behind the AI's strategic decisions.",
+    description: "Gain confidence with clear explanations for every trade, understanding the \"why\" behind the AI&apos;s strategic decisions.",
     iconBgColor: "bg-yellow-100",
     iconTextColor: "text-yellow-700",
   },
@@ -177,7 +175,7 @@ export default function HomePage() {
               Inside the Intelligent Engine
             </h2>
              <p className="mt-4 max-w-2xl mx-auto text-lg sm:text-xl text-gray-600">
-              Discover the sophisticated process behind VectorQuant AI's market analysis and decision-making.
+              Discover the sophisticated process behind VectorQuant AI&apos;s market analysis and decision-making.
             </p>
           </div>
           
@@ -243,7 +241,7 @@ export default function HomePage() {
                   <span>Transparent Reasoning</span>
                 </h3>
                 <p className="text-gray-700 leading-relaxed">
-                   Our AI doesn't operate in a black box. We believe in empowering our users with a clear understanding of the AI's decision-making process. View detailed summaries and key contributing factors that drive each trading decision. This crucial insight into the AI's strategy not only fosters trust but also allows for a more collaborative and informed investment experience, demystifying complex algorithmic actions.
+                   Our AI doesn&apos;t operate in a black box. We believe in empowering our users with a clear understanding of the AI&apos;s decision-making process. View detailed summaries and key contributing factors that drive each trading decision. This crucial insight into the AI&apos;s strategy not only fosters trust but also allows for a more collaborative and informed investment experience, demystifying complex algorithmic actions.
                 </p>
              </div>
              
@@ -284,7 +282,7 @@ export default function HomePage() {
                     VectorQuant AI Live Demo
                 </h2>
                 <p className="mt-4 max-w-2xl mx-auto text-lg sm:text-xl text-gray-300">
-                    Witness VectorQuant AI in action! This live demo showcases our AI's paper trading portfolio and decision reasoning in near real-time. The system actively manages a <strong>$1 Million portfolio</strong> with positions in <strong>AAPL, MSFT, NVDA, and TSLA</strong>, updating its operations <strong>every hour</strong>.
+                    Witness VectorQuant AI in action! This live demo showcases our AI&apos;s paper trading portfolio and decision reasoning in near real-time. The system actively manages a <strong>$1 Million portfolio</strong> with positions in <strong>AAPL, MSFT, NVDA, and TSLA</strong>, updating its operations <strong>every hour</strong>.
                 </p>
                  {/* Refresh Button */}
                 <button 

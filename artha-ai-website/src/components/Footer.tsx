@@ -1,8 +1,6 @@
 'use client'; // Good practice, though not strictly needed for this static footer yet
 
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import React from 'react';
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import { Instagram, Linkedin, Twitter } from 'lucide-react';
 import Image from 'next/image';
 

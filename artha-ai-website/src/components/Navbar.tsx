@@ -1,8 +1,6 @@
 'use client'; // For potential client-side interactions in the future
 
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import React, { useState, useEffect } from 'react';
-// @ts-ignore - Add TypeScript ignore to suppress module errors
 import { Menu, X } from 'lucide-react';
 import Image from 'next/image';
 
