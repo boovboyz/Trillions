@@ -196,7 +196,7 @@ export default function HomePage() {
               <span className="block gradient-text bg-gradient-to-r from-indigo-400 via-cyan-400 to-pink-400 mt-2 sm:mt-4 whitespace-nowrap font-extrabold">Analytical Performance</span>
             </h1>
             <p className="mt-8 mx-auto text-lg text-gray-100 sm:text-xl md:text-2xl leading-relaxed max-w-3xl font-normal antialiased">
-              VectorQuant AI is an Advanced Full-Stack, Agentic AI system for Automated & Intelligent Investing & Portfolio Management<br /><span className="font-bold gradient-text bg-gradient-to-r from-cyan-300 to-indigo-300">Maximize Potential, Control Risk, and Trade Smarter</span>
+              VectorQuant AI is an Advanced Full-Stack, Agentic AI system for Automated Intelligent Investing & Portfolio Management<br /><span className="font-bold gradient-text bg-gradient-to-r from-cyan-300 to-indigo-300">Maximize Potential, Control Risk, and Trade Smarter</span>
             </p>
           </div>
           
