@@ -26,7 +26,7 @@ const features = [
   {
     icon: MessageSquareText, // Icon for transparency/reasoning
     title: "Transparent AI Reasoning",
-    description: "Gain confidence with clear explanations for every trade, understanding the \"why\" behind the AI&apos;s strategic decisions.",
+    description: "Gain confidence with clear explanations for every trade, understanding the \"why\" behind the AI's strategic decisions.",
     iconBgColor: "bg-yellow-100",
     iconTextColor: "text-yellow-700",
   },
@@ -151,10 +151,7 @@ export default function HomePage() {
             {features.map((feature, index) => (
               <div 
                 key={feature.title} 
-                className="card-3d bg-white p-8 rounded-xl shadow-lg border border-gray-100 transition-all duration-300 flex flex-col items-center text-center"
-                style={{ 
-                  transform: `translateY(${Math.sin((scrollY + index * 100) / 400) * 7}px)` 
-                }}
+                className="card-3d bg-white p-8 rounded-xl shadow-3d border border-black transition-all duration-300 flex flex-col items-center text-center"
               >
                 <div className={`mb-4 p-3 rounded-full ${feature.iconBgColor} inline-block depth-effect`}>
                   <feature.icon className={`w-8 h-8 ${feature.iconTextColor}`} />
@@ -181,7 +178,7 @@ export default function HomePage() {
           
           {/* How it works content */}
           <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-12 lg:gap-16 items-start grid-auto-rows-fr">
-             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-lg border border-gray-100 flex flex-col items-center text-center h-full">
+             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-3d border border-black flex flex-col items-center text-center h-full">
                 {/* 3D visualization placeholder */}
                 <div className="relative h-40 bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg overflow-hidden depth-effect w-full">
                   <div className="absolute inset-0 flex items-center justify-center">
@@ -207,7 +204,7 @@ export default function HomePage() {
                 </p>
              </div>
               
-             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-lg border border-gray-100 flex flex-col items-center text-center h-full">
+             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-3d border border-black flex flex-col items-center text-center h-full">
                 {/* 3D visualization placeholder */}
                 <div className="relative h-40 bg-gradient-to-br from-red-50 to-red-100 rounded-lg overflow-hidden depth-effect w-full">
                   <div className="absolute inset-0 flex items-center justify-center">
@@ -225,7 +222,7 @@ export default function HomePage() {
                 </p>
              </div>
               
-             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-lg border border-gray-100 flex flex-col items-center text-center h-full">
+             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-3d border border-black flex flex-col items-center text-center h-full">
                 {/* 3D visualization placeholder */}
                 <div className="relative h-40 bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg overflow-hidden depth-effect w-full">
                   <div className="absolute inset-0 flex items-center justify-center">
@@ -245,7 +242,7 @@ export default function HomePage() {
                 </p>
              </div>
              
-             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-lg border border-gray-100 flex flex-col items-center text-center h-full">
+             <div className="card-3d space-y-6 bg-white p-8 rounded-xl shadow-3d border border-black flex flex-col items-center text-center h-full">
                 {/* 3D visualization placeholder */}
                 <div className="relative h-40 bg-gradient-to-br from-teal-50 to-teal-100 rounded-lg overflow-hidden depth-effect w-full">
                   <div className="absolute inset-0 flex items-center justify-center overflow-hidden">
