@@ -26,7 +26,7 @@ const features = [
   {
     icon: MessageSquareText, // Icon for transparency/reasoning
     title: "Transparent AI Reasoning",
-    description: "Gain confidence with clear explanations for every trade, understanding the \"why\" behind the AI&apos;s strategic decisions.",
+    description: "Gain confidence with clear explanations for every trade, understanding the \"why\" behind the AI's strategic decisions.",
     iconBgColor: "bg-yellow-100",
     iconTextColor: "text-yellow-700",
   },
