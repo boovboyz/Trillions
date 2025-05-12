@@ -3,7 +3,7 @@
 // @ts-ignore - Add TypeScript ignore to suppress module errors
 import React from 'react';
 // @ts-ignore - Add TypeScript ignore to suppress module errors
-import { Instagram, Linkedin, Twitter, Github } from 'lucide-react';
+import { Instagram, Linkedin, Twitter } from 'lucide-react';
 import Image from 'next/image';
 
 export default function Footer() {
@@ -36,20 +36,17 @@ export default function Footer() {
           <div className="space-y-4">
             <h3 className="text-lg font-semibold">Connect With Us</h3>
             <div className="flex space-x-4">
-              <a href="#" className="text-gray-300 hover:text-white transition-colors duration-200">
+              <a href="https://x.com/VectorQuantAI" target="_blank" rel="noopener noreferrer" className="text-gray-300 hover:text-white transition-colors duration-200">
                 <Twitter className="h-5 w-5" />
               </a>
-              <a href="#" className="text-gray-300 hover:text-white transition-colors duration-200">
+              <a href="https://www.linkedin.com/in/vectorquant-ai-0b30a4365" target="_blank" rel="noopener noreferrer" className="text-gray-300 hover:text-white transition-colors duration-200">
                 <Linkedin className="h-5 w-5" />
               </a>
-              <a href="#" className="text-gray-300 hover:text-white transition-colors duration-200">
+              <a href="https://www.instagram.com/vectorquantai/" target="_blank" rel="noopener noreferrer" className="text-gray-300 hover:text-white transition-colors duration-200">
                 <Instagram className="h-5 w-5" />
               </a>
-              <a href="#" className="text-gray-300 hover:text-white transition-colors duration-200">
-                <Github className="h-5 w-5" />
-              </a>
             </div>
-            <p className="text-gray-400 text-sm">contact@vectorquant-ai.com</p>
+            <p className="text-gray-400 text-sm">admin@vectorquantai.com</p>
           </div>
         </div>
 

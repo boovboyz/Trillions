@@ -14,14 +14,14 @@ const features = [
   {
     icon: TrendingUp, // Icon for profit generation
     title: "Intelligent Profit Generation",
-    description: "Leveraging deep market insights and predictive analytics to identify high-potential opportunities beyond simple trends.",
+    description: "By leveraging historical and real-time data with predictive analytics we can identify high-potential opportunities beyond simple trends.",
     iconBgColor: "bg-blue-100",
     iconTextColor: "text-blue-600",
   },
   {
     icon: ShieldCheck, // Icon for risk management
     title: "Advanced Risk Shield",
-    description: "Sophisticated protocols, including dynamic stop-losses and position sizing, continuously work to safeguard your capital.",
+    description: "Sophisticated protocols, including dynamic stop-losses and position sizing, continuously work to safeguard your capital while generating profits.",
     iconBgColor: "bg-red-100",
     iconTextColor: "text-red-600",
   },
@@ -35,7 +35,7 @@ const features = [
   {
     icon: BrainCircuit, // Icon for multi-analyst AI engine
     title: "Multi-Analyst Engine",
-    description: "Benefit from a diverse team of specialized AI analysts, ensuring robust, well-rounded decision-making.",
+    description: "Benefit from a diverse team of specialized AI analysts, ensuring robust and well-rounded decision-making that intelligently generates profits.",
     iconBgColor: "bg-purple-100",
     iconTextColor: "text-purple-600",
   },
@@ -86,10 +86,10 @@ export default function HomePage() {
       <section id="hero" className="w-full min-h-screen flex items-center justify-center py-16 md:py-24 bg-gradient-to-br from-gray-900 via-gray-800 to-black text-white text-center relative overflow-hidden">
         {/* Background elements - expanded to cover entire width */}
         <div className="absolute inset-0 w-full h-full z-0 overflow-hidden opacity-20">
-          <div className="absolute h-96 w-96 rounded-full bg-blue-500 blur-3xl -top-20 -left-20 animate-pulse"></div>
-          <div className="absolute h-96 w-96 rounded-full bg-teal-500 blur-3xl bottom-10 right-10 animate-pulse"></div>
-          <div className="absolute h-96 w-96 rounded-full bg-purple-500 blur-3xl bottom-40 left-40 animate-pulse"></div>
-          <div className="absolute h-96 w-96 rounded-full bg-indigo-500 blur-3xl top-40 right-40 animate-pulse"></div>
+          <div className="absolute h-96 w-96 rounded-full bg-blue-500 blur-md -top-20 -left-20 animate-drift-1"></div>
+          <div className="absolute h-96 w-96 rounded-full bg-teal-500 blur-md bottom-10 right-10 animate-drift-2"></div>
+          <div className="absolute h-96 w-96 rounded-full bg-purple-500 blur-md bottom-40 left-40 animate-drift-1"></div>
+          <div className="absolute h-96 w-96 rounded-full bg-indigo-500 blur-md top-40 right-40 animate-drift-2"></div>
           
           {/* Grid pattern */}
           <div className="absolute inset-0 bg-grid-pattern opacity-20"></div>
@@ -101,8 +101,8 @@ export default function HomePage() {
               Algorithmic Precision
               <span className="block gradient-text bg-gradient-to-r from-blue-400 via-teal-400 to-green-400 mt-2 sm:mt-4 whitespace-nowrap font-extrabold">Analytical Performance</span>
             </h1>
-            <p className="mt-8 mx-auto text-lg text-gray-100 sm:text-xl md:text-2xl leading-relaxed max-w-2xl font-normal antialiased">
-              VectorQuant AI is an Advanced Full-Stack, Agentic AI system for Automated & Intelligent Portfolio Management<br /><span className="font-bold">Maximize Potential, Control Risk, and Trade Smarter</span>
+            <p className="mt-8 mx-auto text-lg text-gray-100 sm:text-xl md:text-2xl leading-relaxed max-w-3xl font-normal antialiased">
+              VectorQuant AI is an Advanced Full-Stack, Agentic AI system for Automated & Intelligent Investing & Portfolio Management<br /><span className="font-bold">Maximize Potential, Control Risk, and Trade Smarter</span>
             </p>
           </div>
           
@@ -145,7 +145,7 @@ export default function HomePage() {
               The VectorQuant AI Advantage
             </h2>
             <p className="mt-4 max-w-2xl mx-auto text-lg sm:text-xl text-gray-600">
-              Combining cutting-edge AI with robust financial principles for superior trading outcomes.
+              Combining cutting-edge AI with robust financial principles and data for superior trading outcomes that compete with top HedgeFunds.
             </p>
           </div>
           

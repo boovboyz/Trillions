@@ -45,7 +45,13 @@ export default function ReasoningDisplay() {
           throw new Error(errorData.error || `Failed to fetch reasoning data: ${response.statusText}`);
         }
         const data: ReasoningItem[] = await response.json();
-        setReasoningData(data);
+        
+        // Filter data to include only specified tickers
+        const allowedTickers = ['AAPL', 'MSFT', 'NVDA', 'TSLA'];
+        const filteredData = data.filter(item => 
+          allowedTickers.includes(item.ticker.toUpperCase())
+        );
+        setReasoningData(filteredData);
       } catch (err: any) {
         console.error("Error fetching reasoning:", err);
         setError(err.message || 'An unexpected error occurred while fetching reasoning data.');
@@ -79,41 +85,64 @@ export default function ReasoningDisplay() {
   if (error) return renderError();
   if (!reasoningData || reasoningData.length === 0) return renderNoData();
 
+  // Group data by ticker
+  const groupedByTicker = reasoningData.reduce((acc, item) => {
+    const ticker = item.ticker;
+    if (!acc[ticker]) {
+      acc[ticker] = [];
+    }
+    acc[ticker].push(item);
+    return acc;
+  }, {} as Record<string, ReasoningItem[]>);
+
   return (
     <section className="bg-white shadow-lg rounded-lg p-6 md:p-8 mt-8">
       <h2 className="text-2xl font-semibold mb-6 text-gray-700 border-b pb-3">Recent AI Trading Analysis</h2>
-      <div className="space-y-6">
-        {reasoningData.map((item) => (
-          <div key={item.id} className="p-5 border border-gray-200 rounded-lg hover:shadow-lg transition-shadow bg-gray-50/50">
-            <div className="flex flex-col sm:flex-row justify-between items-start mb-3">
-              <div className="mb-2 sm:mb-0">
-                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium 
-                  ${item.action.toUpperCase().includes('BUY') || item.action.toUpperCase().includes('COVER') ? 'bg-green-100 text-green-800' : 
-                    item.action.toUpperCase().includes('SELL') || item.action.toUpperCase().includes('SHORT') ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-800'}
-                `}>
-                  {getActionIcon(item.action)} {item.action.toUpperCase()}
-                </span>
-                <span className="ml-2 text-xl font-bold text-gray-900">{item.ticker}</span>
-                {item.item_type === 'Option' && item.option_ticker && (
-                   <span className="ml-2 text-xs font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{item.option_ticker}</span>
-                )}
-                 {item.item_type === 'Option' && item.strategy && (
-                   <span className="ml-2 text-xs font-medium text-purple-700">({item.strategy})</span>
-                )}
-              </div>
-              <span className="text-xs text-gray-500 flex-shrink-0 pt-1">{new Date(item.timestamp).toLocaleString()}</span>
-            </div>
-            <p className="text-sm text-gray-700 mb-3 leading-relaxed pl-1 border-l-2 border-blue-200 ml-1">
-              {item.reasoning_summary}
-            </p>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
-              {item.confidence != null && (
-                <span className="inline-flex items-center"><BarChart className="w-3.5 h-3.5 mr-1 text-indigo-500"/> Confidence: {item.confidence.toFixed(1)}%</span>
-              )}
-              {/* Update this once analysts_involved data is available */}
-              {item.analysts_involved && item.analysts_involved.length > 0 && (
-                 <span className="inline-flex items-center"><Users className="w-3.5 h-3.5 mr-1 text-teal-500"/> Analysts: {item.analysts_involved.join(', ')}</span>
-              ) }
+      <div className="space-y-8"> {/* Outer container for ticker groups */}
+        {Object.entries(groupedByTicker).map(([ticker, items]) => (
+          <div key={ticker} className="ticker-group"> {/* Wrapper for each ticker's section */}
+            <h3 className="text-xl font-semibold text-indigo-700 mb-4 sticky top-0 bg-white py-2 z-10 border-b border-indigo-100 capitalize">{ticker}</h3>
+            <div className="space-y-6"> {/* Container for items within this ticker group */}
+              {items.map((item) => (
+                <div key={item.id} className="p-5 border border-gray-200 rounded-lg hover:shadow-lg transition-shadow bg-gray-50/50">
+                  <div className="flex flex-col sm:flex-row justify-between items-start mb-3">
+                    <div className="mb-2 sm:mb-0 flex flex-wrap items-center gap-2"> {/* Added flex-wrap and gap for better spacing */}
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium 
+                        ${item.action.toUpperCase().includes('BUY') || item.action.toUpperCase().includes('COVER') ? 'bg-green-100 text-green-800' : 
+                          item.action.toUpperCase().includes('SELL') || item.action.toUpperCase().includes('SHORT') ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-800'}
+                      `}>
+                        {getActionIcon(item.action)} {item.action.toUpperCase()}
+                      </span>
+
+                      {/* Differentiate Stock vs Option Analysis */}
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium 
+                        ${item.item_type === 'Stock' ? 'bg-sky-100 text-sky-800' : 'bg-amber-100 text-amber-800'}
+                      `}>
+                        {item.item_type}
+                      </span>
+
+                      {item.item_type === 'Option' && item.option_ticker && (
+                         <span className="text-xs font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{item.option_ticker}</span>
+                      )}
+                       {item.item_type === 'Option' && item.strategy && (
+                         <span className="text-xs font-medium text-purple-700">({item.strategy})</span>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-500 flex-shrink-0 pt-1 sm:pt-0 sm:ml-2">{new Date(item.timestamp).toLocaleString()}</span> {/* Adjusted spacing for timestamp */}
+                  </div>
+                  <p className="text-sm text-gray-700 mb-3 leading-relaxed pl-1 border-l-2 border-blue-200 ml-1">
+                    {item.reasoning_summary}
+                  </p>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+                    {item.confidence != null && (
+                      <span className="inline-flex items-center"><BarChart className="w-3.5 h-3.5 mr-1 text-indigo-500"/> Confidence: {item.confidence.toFixed(1)}%</span>
+                    )}
+                    {item.analysts_involved && item.analysts_involved.length > 0 && (
+                       <span className="inline-flex items-center"><Users className="w-3.5 h-3.5 mr-1 text-teal-500"/> Analysts: {item.analysts_involved.join(', ')}</span>
+                    ) }
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         ))}
