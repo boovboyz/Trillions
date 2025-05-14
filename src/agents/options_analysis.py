@@ -79,7 +79,7 @@ class OptionsContractDecision(BaseModel):
     """Model for a decision on a specific options contract."""
     ticker: str = Field(description="The option contract ticker")
     underlying_ticker: str = Field(description="The underlying stock ticker")
-    action: Literal["buy", "sell", "close"] = Field(description="Action to take on the contract")
+    action: Literal["buy", "sell", "close", "hold"] = Field(description="Action to take on the contract")
     option_type: Literal["call", "put"] = Field(description="Type of option (call or put)")
     strike_price: float = Field(description="Strike price of the option")
     expiration_date: str = Field(description="Expiration date of the option (YYYY-MM-DD)")
@@ -148,14 +148,6 @@ def options_analysis_agent(state: AgentState):
         # Get stock decision
         stock_decision = trading_decisions[ticker]
         
-        # Skip if no action or hold
-        if stock_decision.get("action", "hold").lower() == "hold": 
-            options_decisions[ticker] = {
-                "action": "none",
-                "reasoning": "Stock action is 'hold' - no options strategy applied"
-            }
-            continue
-            
         # Prepare ticker-specific signals for options analysis
         ticker_signals = {
             agent: signals[ticker] for agent, signals in analyst_signals.items()
@@ -174,7 +166,6 @@ def options_analysis_agent(state: AgentState):
         progress.update_status("options_analysis_agent", ticker, "Determining options strategy")
         options_strategy = determine_options_strategy(
             ticker=ticker,
-            stock_decision=stock_decision,
             analyst_signals=ticker_signals,
             current_stock_position=current_stock_position,
             current_option_positions=current_option_positions,
@@ -200,8 +191,7 @@ def options_analysis_agent(state: AgentState):
                 price_target=options_strategy.price_target,
                 max_days_to_expiration=options_strategy.max_days_to_expiration,
                 min_delta=options_strategy.ideal_delta * 0.5,  # Allow range around ideal delta
-                min_liquidity_score=30,
-                max_contracts=10
+                min_liquidity_score=30
             )
             
             if not filtered_contracts:
@@ -225,7 +215,6 @@ def options_analysis_agent(state: AgentState):
         
         contract_decision = select_optimal_contract(
             ticker=ticker,
-            stock_decision=stock_decision,
             options_strategy=options_strategy,
             filtered_contracts=filtered_contracts,
             current_option_positions=current_option_positions,
@@ -265,7 +254,6 @@ def options_analysis_agent(state: AgentState):
 
 def determine_options_strategy(
     ticker: str,
-    stock_decision: Dict[str, Any],
     analyst_signals: Dict[str, Dict[str, Any]],
     current_stock_position: Optional[Dict[str, Any]],
     current_option_positions: Dict[str, Dict[str, Any]],
@@ -273,12 +261,11 @@ def determine_options_strategy(
     model_provider: str,
 ) -> OptionsStrategy:
     """
-    Use LLM to determine the best options strategy based on stock decision, analyst signals,
+    Use LLM to determine the best options strategy based on analyst signals,
     and current positions.
     
     Args:
         ticker: Stock ticker
-        stock_decision: Stock trading decision
         analyst_signals: Analyst signals for the ticker
         current_stock_position: Current stock position (if exists)
         current_option_positions: Current option positions for this underlying
@@ -294,29 +281,25 @@ def determine_options_strategy(
             "system",
             """You are an options trading strategist with deep expertise in derivatives analysis.
             
-            Your task is to analyze a stock trading decision, corresponding analyst signals, and current positions to determine the MOST APPROPRIATE options strategy.
+            Your task is to analyze analyst signals and current positions to determine the MOST APPROPRIATE options strategy.
             
             Consider the following factors:
-            1. The stock trading decision (buy, sell, short, cover)
-            2. The confidence level of the decision
-            3. The collective signals from various analysts
-            4. Current stock and options positions
-            5. The volatility implications
-            6. Risk/reward balance
-            7. Time horizon implications
+            1. The collective signals from various analysts
+            2. Current stock and options positions: Evaluate how current positions align with, contradict, or could be hedged by a new options strategy. Consider if a new strategy would create undue concentration, complement existing holdings, or if existing options could be rolled or adjusted.
+            3. The volatility implications
+            4. Risk/reward balance
+            5. Time horizon implications
             
-            If the signals are contradictory or unclear, or if options simply aren't appropriate, return "none" as the strategy_type.
+            If the signals are contradictory or unclear, or if options simply aren't appropriate for the current market conditions or portfolio state, return "none" as the strategy_type.
             
             Available strategy types:
             - "long_call": Buy call options (bullish outlook, defined risk, leverage)
             - "long_put": Buy put options (bearish outlook, defined risk, leverage)
             - "none": No options strategy appropriate
             
-            IMPORTANT: If the confidence level is below 60%, default to "none" as the options strategy, as the certainty isn't high enough to warrant options exposure.
-            
             Return a detailed options strategy recommendation with the following fields:
             - strategy_type: One of the defined strategy types
-            - confidence: 0-100 confidence in the strategy (never higher than stock confidence)
+            - confidence: 0-100 confidence in the strategy
             - reasoning: Detailed explanation for the strategy selection
             - max_days_to_expiration: Recommended maximum days to expiration
             - ideal_delta: Target delta value to look for (0-1)
@@ -328,12 +311,7 @@ def determine_options_strategy(
         ),
         (
             "human",
-            """Here is the stock trading decision, analyst signals, and current positions for ticker {ticker}:
-            
-            Stock Decision:
-            ```json
-            {stock_decision}
-            ```
+            """Here is the analyst signals and current positions for ticker {ticker}:
             
             Analyst Signals:
             ```json
@@ -377,7 +355,6 @@ def determine_options_strategy(
     
     prompt = template.invoke({
         "ticker": ticker,
-        "stock_decision": json.dumps(stock_decision, indent=2),
         "analyst_signals": json.dumps(analyst_signals, indent=2),
         "current_stock_position": json.dumps(current_stock_position, indent=2) if current_stock_position else "null",
         "current_option_positions": json.dumps(current_option_positions, indent=2)
@@ -410,7 +387,6 @@ def determine_options_strategy(
 
 def select_optimal_contract(
     ticker: str,
-    stock_decision: Dict[str, Any],
     options_strategy: OptionsStrategy,
     filtered_contracts: List[OptionContract],
     current_option_positions: Dict[str, Dict[str, Any]],
@@ -422,7 +398,6 @@ def select_optimal_contract(
     
     Args:
         ticker: Stock ticker
-        stock_decision: Stock trading decision
         options_strategy: Options strategy determination
         filtered_contracts: List of filtered option contracts
         current_option_positions: Current option positions for this underlying
@@ -451,6 +426,7 @@ Consider the following factors:
 4. Liquidity and bid-ask spread
 5. Risk-reward profile given the target price
 6. Current option positions (avoid duplicate strategies, consider closing or adjusting existing positions)
+7. Overall portfolio construction and how this specific contract selection fits within the broader strategy suggested by analyst signals and existing holdings.
 
 For existing positions, consider:
 - If they align with the current strategy, recommend holding or adjusting
@@ -462,12 +438,7 @@ For existing positions, consider:
     template = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human",
-         """Here is the stock trading decision, options strategy, current positions, and candidate contracts for ticker {ticker}:
-
-Stock Decision:
-```json
-{stock_decision}
-```
+         """Here is the options strategy, current positions, and candidate contracts for ticker {ticker}:
 
 Options Strategy:
 ```json
@@ -491,7 +462,7 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
 {{
     "ticker": "<O:TICKER...>",
     "underlying_ticker": "{ticker}",
-    "action": "buy" or "sell" or "close",
+    "action": "buy" or "sell" or "close" or "hold",
     "option_type": "call" or "put",
     "strike_price": <float>,
     "expiration_date": "YYYY-MM-DD",
@@ -516,7 +487,6 @@ IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` a
     
     prompt = template.invoke({
         "ticker": ticker,
-        "stock_decision": json.dumps(stock_decision, indent=2),
         "options_strategy": json.dumps(options_strategy.model_dump(), indent=2),
         "current_option_positions": json.dumps(current_option_positions, indent=2),
         "contracts_data": json.dumps(contracts_data_for_llm, indent=2, default=str),
