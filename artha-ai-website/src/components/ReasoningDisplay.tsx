@@ -57,13 +57,7 @@ export default function ReasoningDisplay({ preloadedData }: ReasoningDisplayProp
           throw new Error(errorData.error || `Failed to fetch reasoning data: ${response.statusText}`);
         }
         const data: ReasoningItem[] = await response.json();
-        
-        // Filter data to include only specified tickers
-        const allowedTickers = ['AAPL', 'MSFT', 'NVDA', 'TSLA'];
-        const filteredData = data.filter(item => 
-          allowedTickers.includes(item.ticker.toUpperCase())
-        );
-        setReasoningData(filteredData);
+        setReasoningData(data);
       } catch (err: unknown) {
         console.error("Error fetching reasoning:", err);
         let message = 'An unexpected error occurred while fetching reasoning data.';

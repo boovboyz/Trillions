@@ -16,6 +16,9 @@ export default function LiveDemoContainer() {
   const [tradesData, setTradesData] = useState<any>(null);
   const [reasoningData, setReasoningData] = useState<any>(null);
 
+  // Allowed tickers for reasoning data
+  const ALLOWED_TICKERS = ['AAPL', 'MSFT', 'NVDA', 'TSLA'];
+
   // Handle data prefetching to reduce jitter during refresh
   useEffect(() => {
     async function fetchAllData() {
@@ -35,10 +38,15 @@ export default function LiveDemoContainer() {
           const tradesData = await tradesResponse.json();
           const reasoningData = await reasoningResponse.json();
           
+          // Filter reasoning data to include only specified tickers
+          const filteredReasoningData = reasoningData.filter((item: any) => 
+            ALLOWED_TICKERS.includes(item.ticker.toUpperCase())
+          );
+          
           // Store fetched data in state
           setPortfolioData(portfolioData);
           setTradesData(tradesData);
-          setReasoningData(reasoningData);
+          setReasoningData(filteredReasoningData);
         }
       } catch (error) {
         console.error("Error fetching demo data:", error);
