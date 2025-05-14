@@ -116,50 +116,9 @@ export default function HomePage() {
       });
     };
     
-    // Generate demo section arrows client-side
-    const generateDemoArrows = () => {
-      return Array.from({ length: 80 }).map((_, index) => {
-        // All arrows point up
-        const isUp = true;
-        const size = Math.random() * 1.2 + 0.8;
-        const position = Math.random() * 100; // horizontal position
-        
-        // Distribute arrows vertically throughout the viewport
-        const startPosition = Math.random() * 150; // 0-150% of viewport height
-        
-        // Vary the duration slightly but make them faster than hero section
-        const duration = Math.random() * 6 + 10; // 10-16s for faster movement
-        
-        // Calculate delay based on vertical position to maintain continuous flow
-        const delay = (startPosition / 150) * duration * -1;
-        
-        const type = Math.random() > 0.6 
-          ? Math.random() > 0.5 
-            ? 'arrow-red' 
-            : 'arrow-green'
-          : Math.random() > 0.5
-            ? 'arrow-blue'
-            : 'arrow-purple';
-              
-        return (
-          <div 
-            key={`demo-arrow-${index}`}
-            className={`stock-arrow arrow-up ${type}`}
-            style={{
-              left: `${position}%`,
-              scale: size,
-              bottom: `${-80 + startPosition}vh`, // Adjust start position
-              animationDuration: `${duration}s`,
-              animationDelay: `${delay}s`,
-              zIndex: 0
-            }}
-          ></div>
-        );
-      });
-    };
-    
+    // Set an empty array for demo arrows to remove them
     setHeroArrows(generateHeroArrows());
-    setDemoArrows(generateDemoArrows());
+    setDemoArrows([]);
 
     return () => window.removeEventListener('scroll', handleScroll);
   }, []); // Empty dependency array ensures this runs once on mount (client-side)
@@ -423,8 +382,7 @@ export default function HomePage() {
           {/* Grid pattern background */}
           <div className="grid-pattern-bg"></div>
           
-          {/* Stock arrows */}
-          {demoArrows}
+          {/* Stock arrows - removed */}
         </div>
         
         <div className="container mx-auto px-4 md:px-6 relative z-10">
