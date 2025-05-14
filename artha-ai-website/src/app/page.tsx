@@ -2,10 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 // Import icons from lucide-react
-import { TrendingUp, ShieldCheck, MessageSquareText, BrainCircuit, Bot, Network, Scale, Activity, RefreshCw, ArrowRight, ChevronDown } from 'lucide-react';
-import PortfolioDisplay from '@/components/PortfolioDisplay';
-import ReasoningDisplay from '@/components/ReasoningDisplay';
-import RecentTradesDisplay from '@/components/RecentTradesDisplay';
+import { TrendingUp, ShieldCheck, MessageSquareText, BrainCircuit, Bot, Network, Scale, Activity, ArrowRight, ChevronDown } from 'lucide-react';
+import LiveDemoContainer from '@/components/LiveDemoContainer';
 import ContactForm from '@/components/ContactForm';
 
 const features = [
@@ -44,14 +42,12 @@ const features = [
 ];
 
 export default function HomePage() {
-  const [refreshKey, setRefreshKey] = useState<number>(0);
   const [scrollY, setScrollY] = useState<number>(0);
   // State for client-side calculated styles to avoid hydration mismatch
   const [multiAnalystNodeStyles, setMultiAnalystNodeStyles] = useState<React.CSSProperties[]>([]);
   const [continuousAdaptationBarStyles, setContinuousAdaptationBarStyles] = useState<React.CSSProperties[]>([]);
   // State for client-side generated arrows to avoid hydration mismatch
   const [heroArrows, setHeroArrows] = useState<React.ReactNode[]>([]);
-  const [demoArrows, setDemoArrows] = useState<React.ReactNode[]>([]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -116,16 +112,10 @@ export default function HomePage() {
       });
     };
     
-    // Set an empty array for demo arrows to remove them
     setHeroArrows(generateHeroArrows());
-    setDemoArrows([]);
 
     return () => window.removeEventListener('scroll', handleScroll);
   }, []); // Empty dependency array ensures this runs once on mount (client-side)
-
-  const handleRefresh = () => {
-    setRefreshKey((prevKey: number) => prevKey + 1);
-  };
 
   const scrollToSection = (e: React.MouseEvent<HTMLAnchorElement>, id: string) => {
     e.preventDefault();
@@ -377,46 +367,14 @@ export default function HomePage() {
 
       {/* Live Demo Section */}
       <section id="demo" className="w-full py-16 md:py-20 lg:py-28 bg-gradient-to-br from-indigo-950 via-gray-900 to-black text-white relative overflow-hidden">
-        {/* Background effects */}
-        <div className="stock-arrows-bg">
+        {/* Background effects - simplified for better performance */}
+        <div className="absolute inset-0 z-0">
           {/* Grid pattern background */}
           <div className="grid-pattern-bg"></div>
-          
-          {/* Stock arrows - removed */}
         </div>
         
-        <div className="container mx-auto px-4 md:px-6 relative z-10">
-            <div className="text-center mb-8 md:mb-10 relative">
-               <h2 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-extrabold text-white tracking-tight font-mono enhanced-glow-animated">
-                   VectorQuant AI Live Demo
-               </h2>
-               <p className="mt-4 max-w-2xl mx-auto text-base md:text-lg text-gray-300">
-                   Witness VectorQuant AI in action! This live demo showcases our AI&apos;s paper trading portfolio and decision reasoning in near real-time. The system actively manages a <strong>$1 Million portfolio</strong> with positions in <strong>AAPL, MSFT, NVDA, and TSLA</strong>, updating its operations <strong>every hour</strong>.
-               </p>
-                {/* Refresh Button */}
-               <button 
-                 onClick={handleRefresh}
-                 className="mt-4 md:mt-0 md:absolute md:top-0 md:right-0 inline-flex items-center px-3 py-1.5 md:px-4 md:py-2 border border-transparent text-xs md:text-sm font-medium rounded-full shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-indigo-500 transition-colors pulse-glow"
-                 title="Refresh Demo Data"
-               >
-                   <RefreshCw className="w-3.5 h-3.5 md:w-4 md:h-4 mr-1.5 md:mr-2" /> Refresh Data
-               </button>
-            </div>
-            
-            {/* Demo display with enhanced glow effect */}
-            <div className="relative p-1 max-w-6xl mx-auto rounded-xl bg-gradient-to-r from-indigo-500 via-cyan-500 to-pink-500 shadow-3d enhanced-glow-animated">
-              <div className="absolute inset-0 bg-gradient-to-r from-indigo-500 via-cyan-500 to-pink-500 opacity-70 blur-xl rounded-xl"></div>
-              <div className="relative bg-gray-900 rounded-lg p-4 md:p-6 lg:p-8 space-y-8 md:space-y-12 shadow-inner backdrop-blur-sm">
-                 <PortfolioDisplay key={`portfolio-${refreshKey}`} />
-                 <RecentTradesDisplay key={`trades-${refreshKey}`} />
-                 <ReasoningDisplay key={`reasoning-${refreshKey}`} />
-              </div>
-            </div>
-            
-            <p className="text-center text-2xs md:text-xs text-gray-400 mt-6 md:mt-8 max-w-3xl mx-auto">
-               Disclaimer: The demo utilizes a paper trading account and may include historical or simulated data for illustrative purposes. Trading involves substantial risk, and past performance is not indicative of future results.
-           </p>
-        </div>
+        {/* Use the dedicated container component for better loading performance */}
+        <LiveDemoContainer />
       </section>
 
       {/* Contact Section */}

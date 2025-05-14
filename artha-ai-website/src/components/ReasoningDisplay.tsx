@@ -17,6 +17,10 @@ interface ReasoningItem {
   option_details?: Record<string, unknown> | null;
 }
 
+interface ReasoningDisplayProps {
+  preloadedData?: ReasoningItem[] | null;
+}
+
 // Helper to get an icon based on action
 const getActionIcon = (action: string) => {
   const upperAction = action.toUpperCase();
@@ -29,12 +33,20 @@ const getActionIcon = (action: string) => {
   return <MinusCircle className="w-4 h-4 inline-block mr-1 text-gray-500" />; // Default for HOLD etc.
 }
 
-export default function ReasoningDisplay() {
-  const [reasoningData, setReasoningData] = useState<ReasoningItem[] | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+export default function ReasoningDisplay({ preloadedData }: ReasoningDisplayProps) {
+  const [reasoningData, setReasoningData] = useState<ReasoningItem[] | null>(preloadedData || null);
+  const [isLoading, setIsLoading] = useState(!preloadedData);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // If preloaded data is provided, use it directly
+    if (preloadedData) {
+      setReasoningData(preloadedData);
+      setIsLoading(false);
+      return;
+    }
+
+    // Otherwise fetch data as usual
     async function fetchReasoningData() {
       setIsLoading(true);
       setError(null);
@@ -64,7 +76,7 @@ export default function ReasoningDisplay() {
     }
 
     fetchReasoningData();
-  }, []);
+  }, [preloadedData]);
 
   const renderLoading = () => (
     <div className="text-center p-4 md:p-10 bg-white rounded-lg shadow-md">

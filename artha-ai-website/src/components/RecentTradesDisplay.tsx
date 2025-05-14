@@ -12,12 +12,24 @@ interface Trade {
   status: string;
 }
 
-export default function RecentTradesDisplay() {
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+interface RecentTradesDisplayProps {
+  preloadedData?: Trade[] | null;
+}
+
+export default function RecentTradesDisplay({ preloadedData }: RecentTradesDisplayProps) {
+  const [trades, setTrades] = useState<Trade[]>(preloadedData || []);
+  const [isLoading, setIsLoading] = useState(!preloadedData);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // If preloaded data is provided, use it directly
+    if (preloadedData) {
+      setTrades(preloadedData);
+      setIsLoading(false);
+      return;
+    }
+
+    // Otherwise fetch data as usual
     async function fetchRecentTrades() {
       setIsLoading(true);
       setError(null);
@@ -41,7 +53,7 @@ export default function RecentTradesDisplay() {
     }
 
     fetchRecentTrades();
-  }, []);
+  }, [preloadedData]);
 
   const renderLoading = () => (
     <div className="text-center p-4 md:p-10 bg-white rounded-lg shadow-md">

@@ -21,12 +21,24 @@ interface PortfolioData {
   timestamp: string;
 }
 
-export default function PortfolioDisplay() {
-  const [portfolioData, setPortfolioData] = useState<PortfolioData | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+interface PortfolioDisplayProps {
+  preloadedData?: PortfolioData | null;
+}
+
+export default function PortfolioDisplay({ preloadedData }: PortfolioDisplayProps) {
+  const [portfolioData, setPortfolioData] = useState<PortfolioData | null>(preloadedData || null);
+  const [isLoading, setIsLoading] = useState(!preloadedData);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // If preloaded data is provided, use it directly
+    if (preloadedData) {
+      setPortfolioData(preloadedData);
+      setIsLoading(false);
+      return;
+    }
+
+    // Otherwise fetch data as usual
     async function fetchPortfolioData() {
       setIsLoading(true);
       setError(null);
@@ -50,7 +62,7 @@ export default function PortfolioDisplay() {
     }
 
     fetchPortfolioData();
-  }, []);
+  }, [preloadedData]);
 
   const renderLoading = () => (
     <div className="text-center p-4 md:p-10 bg-white rounded-lg shadow-md">
