@@ -44,20 +44,20 @@ export default function RecentTradesDisplay() {
   }, []);
 
   const renderLoading = () => (
-    <div className="text-center p-10 bg-white rounded-lg shadow-md">
+    <div className="text-center p-4 md:p-10 bg-white rounded-lg shadow-md">
       <p className="text-gray-500">Loading recent trades...</p>
     </div>
   );
 
   const renderError = () => (
-    <div className="text-center p-10 bg-red-50 rounded-lg shadow-md border border-red-200">
+    <div className="text-center p-4 md:p-10 bg-red-50 rounded-lg shadow-md border border-red-200">
       <p className="text-red-700 font-semibold">Error Loading Trades</p>
       <p className="text-red-600 text-sm mt-2">{error}</p>
     </div>
   );
 
   const renderNoData = () => (
-    <div className="text-center p-10 bg-white rounded-lg shadow-md">
+    <div className="text-center p-4 md:p-10 bg-white rounded-lg shadow-md">
       <p className="text-gray-500">No recent trades available.</p>
     </div>
   );
@@ -73,36 +73,39 @@ export default function RecentTradesDisplay() {
   };
 
   return (
-    <section className="bg-white shadow-lg rounded-lg p-6 md:p-8">
-      <h2 className="text-2xl font-semibold mb-6 text-gray-700 border-b pb-3">Recent Trades</h2>
+    <section className="bg-white shadow-lg rounded-lg p-4 md:p-8">
+      <h2 className="text-xl md:text-2xl font-semibold mb-4 md:mb-6 text-gray-700 border-b pb-3">Recent Trades</h2>
       
-      <div className="overflow-x-auto border border-gray-200 rounded-lg">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-100">
-            <tr>
-              {['Ticker', 'Type', 'Quantity', 'Price', 'Date', 'Status'].map(header => (
-                <th key={header} scope="col" className="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  {header}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {trades.map((trade) => (
-              <tr key={trade.id} className="hover:bg-gray-50 transition-colors duration-150 ease-in-out">
-                <td className="px-5 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{trade.ticker}</td>
-                <td className={`px-5 py-4 whitespace-nowrap text-sm font-semibold 
-                  ${trade.type.toLowerCase() === 'buy' ? 'text-green-600' : 'text-red-600'}`}>
-                  {trade.type.toUpperCase()}
-                </td>
-                <td className="px-5 py-4 whitespace-nowrap text-sm text-gray-600 text-right">{trade.quantity}</td>
-                <td className="px-5 py-4 whitespace-nowrap text-sm text-gray-600 text-right">${trade.price.toFixed(2)}</td>
-                <td className="px-5 py-4 whitespace-nowrap text-sm text-gray-600">{formatDate(trade.timestamp)}</td>
-                <td className="px-5 py-4 whitespace-nowrap text-sm text-gray-600 capitalize">{trade.status}</td>
+      <div className="overflow-x-auto -mx-4 px-4 pb-2">
+        <div className="border border-gray-200 rounded-lg min-w-full">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-100">
+              <tr>
+                <th scope="col" className="px-2 md:px-5 py-2 md:py-3 text-left text-2xs md:text-xs font-medium text-gray-500 uppercase tracking-wider">Ticker</th>
+                <th scope="col" className="px-2 md:px-5 py-2 md:py-3 text-left text-2xs md:text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                <th scope="col" className="px-2 md:px-5 py-2 md:py-3 text-right text-2xs md:text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                <th scope="col" className="px-2 md:px-5 py-2 md:py-3 text-right text-2xs md:text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
+                <th scope="col" className="px-2 md:px-5 py-2 md:py-3 text-left text-2xs md:text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                <th scope="col" className="px-2 md:px-5 py-2 md:py-3 text-left text-2xs md:text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {trades.map((trade) => (
+                <tr key={trade.id} className="hover:bg-gray-50 transition-colors duration-150 ease-in-out">
+                  <td className="px-2 md:px-5 py-2 md:py-4 whitespace-nowrap text-xs md:text-sm font-medium text-gray-900">{trade.ticker}</td>
+                  <td className={`px-2 md:px-5 py-2 md:py-4 whitespace-nowrap text-xs md:text-sm font-semibold 
+                    ${trade.type.toLowerCase() === 'buy' ? 'text-green-600' : 'text-red-600'}`}>
+                    {trade.type.toUpperCase()}
+                  </td>
+                  <td className="px-2 md:px-5 py-2 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-600 text-right">{trade.quantity}</td>
+                  <td className="px-2 md:px-5 py-2 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-600 text-right">${trade.price.toFixed(2)}</td>
+                  <td className="px-2 md:px-5 py-2 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-600">{formatDate(trade.timestamp)}</td>
+                  <td className="px-2 md:px-5 py-2 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-600 capitalize">{trade.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   );

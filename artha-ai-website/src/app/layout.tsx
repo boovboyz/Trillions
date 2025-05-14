@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, Outfit } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/Navbar"; // Assuming @ is configured for src
@@ -21,6 +21,12 @@ const outfit = Outfit({
 export const metadata: Metadata = {
   title: "VectorQuant AI - Intelligent Algorithmic Trading",
   description: "Maximize investment returns and minimize risk with our sophisticated AI-powered trading platform.",
+};
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 5,
 };
 
 export default function RootLayout({

@@ -40,14 +40,14 @@ export default function Navbar() {
       }`}
     >
       <div className="container mx-auto px-4 md:px-6">
-        <div className="flex justify-between items-center h-16">
+        <div className="flex justify-between items-center h-14 md:h-16">
           {/* Logo */}
           <a href="#hero" onClick={(e) => handleScroll(e, 'hero')} 
              className="flex items-center space-x-2 group">
-            <div className="relative h-12 w-12 flex items-center justify-center">
-              <Image src="/artha_logo.png" alt="Artha AI Logo" width={48} height={48} className="object-contain" />
+            <div className="relative h-8 w-8 md:h-10 md:w-10 flex items-center justify-center">
+              <Image src="/artha_logo.png" alt="Artha AI Logo" width={40} height={40} className="object-contain" />
             </div>
-            <span className={`text-xl font-bold tracking-tight font-heading ${
+            <span className={`text-base md:text-xl font-bold tracking-tight font-heading ${
               isScrolled ? 'text-gray-900 dark:text-white' : 'text-white'
             }`}>
               VectorQuant AI
@@ -69,16 +69,17 @@ export default function Navbar() {
           <div className="md:hidden">
             <button 
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-              className={`p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+              className={`p-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 ${
                 isScrolled 
                   ? 'hover:bg-gray-200 focus:ring-blue-500 text-gray-900 dark:text-white dark:hover:bg-gray-800' 
                   : 'hover:bg-white/10 focus:ring-white text-white'
               }`}
+              aria-label="Toggle menu"
             >
               {isMobileMenuOpen ? (
-                <X className="h-6 w-6" />
+                <X className="h-5 w-5" />
               ) : (
-                <Menu className="h-6 w-6" />
+                <Menu className="h-5 w-5" />
               )}
             </button>
           </div>
@@ -151,7 +152,7 @@ function MobileNavLink({
     <a 
       href={href} 
       onClick={(e: React.MouseEvent<HTMLAnchorElement>) => onClick(e, id)}
-      className={`block px-3 py-2 rounded-md text-base font-medium text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-800 ${className}`}
+      className={`block px-3 py-2 rounded-md text-sm font-medium text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-800 ${className}`}
     >
       {children}
     </a>
