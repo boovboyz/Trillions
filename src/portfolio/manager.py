@@ -690,26 +690,26 @@ class PortfolioManager:
                   Your goal is to maximize returns while adhering to strict risk management rules provided in the `risk_context`.
 
                   Decision Process:
-                  1. Analyze the signals from various analysts (`signals_by_ticker`). Note their confidence levels.
+                  1. Analyze the signals from various analysts (`signals_by_ticker`). Note their confidence levels and consensus.
                   2. CRITICAL: Evaluate the `risk_context` provided for each ticker and the overall portfolio. This context overrides general rules.
                      - `max_potential_buy_value`: The maximum dollar amount you can allocate to a NEW BUY order for this ticker, considering cash reserves and position limits.
                      - `max_potential_short_value`: The maximum dollar amount you can allocate to a NEW SHORT order for this ticker, considering margin and short limits.
                      - `portfolio_context`: Flags indicating overall portfolio health (e.g., `max_drawdown_reached`, `max_trades_reached`, `cash_below_reserve`, `day_trades_remaining`).
-                  3. Evaluate the current portfolio state (`portfolio_positions`, `portfolio_cash`).
+                  3. Evaluate the current portfolio state (`portfolio_positions`, `portfolio_cash`). **When an existing position is present, your primary goal is to manage it optimally based on new signals and risk context. Consider if the existing position aligns with the current outlook. If analyst conviction is very high and aligns with an existing position, consider holding or even scaling if risk context allows. Only generate an opposing action (e.g., cover a short if analysts turn bullish, or sell a long if analysts turn bearish) if signals clearly indicate a change in outlook or if risk management necessitates it.**
                   4. Synthesize all information to determine the optimal action (buy, sell, short, cover, hold) for each ticker.
                   5. Propose a *quantity* reflecting conviction, scaled by confidence, BUT STRICTLY LIMITED BY:
                      - The calculated `max_potential_buy_value` or `max_potential_short_value` from `risk_context`. Convert value to shares using `current_prices`.
                      - Existing position sizes for sell/cover actions (cannot sell/cover more than held).
                      - Overall portfolio constraints from `portfolio_context` (e.g., NO new buy/short orders if `max_drawdown_reached` or `cash_below_reserve` is true).
-                     - Available day trades (`day_trades_remaining`) if the action constitutes a day trade (opening and closing same day). Prioritize covering shorts even if it uses the last day trade.
-                  6. Provide clear reasoning, referencing specific signals and risk context constraints.
+                     - Available day trades (`day_trades_remaining`) if the action constitutes a day trade (opening and closing same day). Prioritize covering shorts even if it uses the last day trade, *but only if the decision to cover is well-justified by a shift in signals or risk.*
+                  6. Provide clear reasoning, referencing specific signals, current position context, and risk context constraints.
 
-                  Trading Rules Summary (Refer to Risk Context First!):
+                  Trading Rules Summary (Refer to Risk Context and Decision Process for Nuance!):
                   - Buys: Require available cash (check `cash_below_reserve`=false), respect `max_potential_buy_value`. Blocked if `max_drawdown_reached`.
-                  - Sells: Require existing long position. Quantity <= held shares.
-                  - Shorts: Require shorting enabled (`enable_shorts`=true), available margin (implied by `max_potential_short_value` > 0), strong bearish signals. Blocked if `max_drawdown_reached`.
-                  - Covers: Require existing short position. Quantity <= held shares. Generally allowed even if day trade limits are hit.
-                  - Hold: Default action if no strong signal or if blocked by risk context.
+                  - Sells: Require existing long position. Decision to sell should be based on a bearish shift in analyst signals or risk management. Quantity <= held shares.
+                  - Shorts: Require shorting enabled (`enable_shorts`=true), available margin (implied by `max_potential_short_value` > 0), strong and preferably consensus bearish signals. Blocked if `max_drawdown_reached`.
+                  - Covers: Require existing short position. **Decision to cover should be based on a significant bullish shift in overall analyst signals, a weakening of prior bearish conviction, or if risk management necessitates reducing short exposure. If strong bearish conviction persists and aligns with risk context, consider holding the short. Quantity <= held shares. Generally allowed even if day trade limits are hit, but the decision to cover must be strategically sound.**
+                  - Hold: Default action if no strong signal, if signals support maintaining the current position, or if blocked by risk context.
 
                   Available Actions: "buy", "sell", "short", "cover", "hold"
 
