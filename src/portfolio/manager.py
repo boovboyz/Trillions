@@ -708,7 +708,13 @@ class PortfolioManager:
                   - Buys: Require available cash (check `cash_below_reserve`=false), respect `max_potential_buy_value`. Blocked if `max_drawdown_reached`.
                   - Sells: Require existing long position. Decision to sell should be based on a bearish shift in analyst signals or risk management. Quantity <= held shares.
                   - Shorts: Require shorting enabled (`enable_shorts`=true), available margin (implied by `max_potential_short_value` > 0), strong and preferably consensus bearish signals. Blocked if `max_drawdown_reached`.
-                  - Covers: Require existing short position. **Decision to cover should be based on a significant bullish shift in overall analyst signals, a weakening of prior bearish conviction, or if risk management necessitates reducing short exposure. If strong bearish conviction persists and aligns with risk context, consider holding the short. Quantity <= held shares. Generally allowed even if day trade limits are hit, but the decision to cover must be strategically sound.**
+                  - Covers: Require existing short position.
+                    - If signals are mixed for a ticker with an existing short position:
+                        - You should ONLY cover if the position's `profit_loss_pct` is less than -5.0 (loss greater than 5%).
+                        - If `profit_loss_pct` is -5.0 or greater (loss is 5% or less, or it's a profit), you should HOLD the position, unless other strong factors (like a definitive portfolio-wide risk management rule or a very strong, new bullish consensus overriding the mixed signals) compel a cover. Do not cover *solely* based on mixed signals if the loss condition is not met.
+                    - For other scenarios (e.g., signals are not mixed but indicate a cover, or clear bullish shift, or risk management dictates it for reasons other than just mixed signals with small loss): The decision to cover should be based on a **markedly strong and clear** bullish shift in overall analyst signals (e.g., multiple high-confidence analysts reversing their stance, or a new overwhelming bullish consensus), a **very substantial** weakening of prior bearish conviction, or if risk management **explicitly** necessitates reducing short exposure for reasons beyond typical signal fluctuations.
+                    - If strong bearish conviction persists and the specific conditions for covering (especially the mixed signal + loss > 5% rule or a truly significant signal shift) are not met, consider holding the short.
+                    - Quantity <= held shares. Generally allowed even if day trade limits are hit, but the decision to cover must be strategically sound.
                   - Hold: Default action if no strong signal, if signals support maintaining the current position, or if blocked by risk context.
 
                   Available Actions: "buy", "sell", "short", "cover", "hold"
@@ -741,7 +747,7 @@ class PortfolioManager:
                   ```
 
                   Portfolio Cash: {portfolio_cash:.2f}
-                  Current Positions:
+                  Current Positions (includes `profit_loss_pct`):
                   ```json
                   {portfolio_positions_json}
                   ```
@@ -762,7 +768,8 @@ class PortfolioManager:
             simple_positions = {
                  ticker: {
                      "quantity": pos.get("qty"),
-                     "side": pos.get("side")
+                     "side": pos.get("side"),
+                     "profit_loss_pct": pos.get("profit_loss_pct") # Ensure P&L percentage is included
                  } for ticker, pos in portfolio_state.get('positions', {}).items()
             }
 

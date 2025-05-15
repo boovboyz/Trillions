@@ -466,6 +466,32 @@ Filtered Contracts:
 ```
 
 Select the single best contract based on risk/reward and strategy alignment.
+
+Here is an example of the exact JSON format you must return:
+```json
+{{
+    "ticker": "O:XYZ241231C00100000",
+    "underlying_ticker": "XYZ",
+    "action": "buy",
+    "option_type": "call",
+    "strike_price": 100.0,
+    "expiration_date": "2024-12-31",
+    "strategy": "long_call",
+    "confidence": 85.5,
+    "reasoning": "This contract was selected due to its optimal delta, reasonable time to expiration, and good liquidity, aligning with the bullish strategy.",
+    "limit_price": 1.25,
+    "stop_loss": 0.80,
+    "take_profit": 2.50,
+    "greeks": {{
+        "delta": 0.6,
+        "gamma": 0.05,
+        "theta": -0.02,
+        "vega": 0.1
+    }}
+}}
+```
+
+Now, based on the data provided for {ticker}, select the best contract.
 Return ONLY the JSON object representing the chosen contract, adhering strictly to this format:
 
 ```json
@@ -474,7 +500,7 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
     "underlying_ticker": "{ticker}",
     "action": "buy" or "sell" or "close" or "hold",
     "option_type": "call" or "put",
-    "strike_price": <float>,
+    "strike_price": <float, e.g., 150.0 or 45.50>,  // MUST be a numerical value only. DO NOT include any other characters, words, or symbols.
     "expiration_date": "YYYY-MM-DD",
     "strategy": "{strategy_type}",
     "confidence": <float between 0 and 100>,
