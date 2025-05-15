@@ -416,7 +416,7 @@ def select_optimal_contract(
     # Limit the number of contracts sent to LLM to prevent overloading it
     # We still get the benefit of all contracts being considered in filtering,
     # but only send the top ones to the LLM for final selection
-    llm_max_contracts = 10
+    llm_max_contracts = 100
     contracts_for_llm = sorted_contracts[:llm_max_contracts]
     logger.info(f"Limiting LLM input to top {llm_max_contracts} contracts out of {len(filtered_contracts)} total filtered contracts for {ticker}")
     
