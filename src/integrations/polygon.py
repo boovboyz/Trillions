@@ -332,7 +332,7 @@ class PolygonClient:
         max_days_to_expiration: int = 60,
         min_delta: float = 0.1,
         min_liquidity_score: float = 30,
-        max_contracts: int = 10 # Limit final selection size
+        max_contracts: int = 999999 # No practical limit on final selection size
     ) -> Union[List[OptionContract], List[Tuple[OptionContract, OptionContract]]]:
         """
         Filter options chain by a given strategy using the Option Chain Snapshot.
@@ -616,11 +616,11 @@ class PolygonClient:
                  abs(c.strike_price - current_price) # Then proximity to ATM
              ))
 
-        # --- Step 7: Return final candidates, limited by max_contracts ---
+        # --- Step 7: Return final candidates, no longer limited ---
         final_count = len(candidates)
-        logger.info(f"Found {final_count} final candidates for {ticker} strategy {strategy}. Limiting to {max_contracts}.")
+        logger.info(f"Found {final_count} final candidates for {ticker} strategy {strategy}.")
         # Add logging for top candidates if needed
         # for i, c in enumerate(candidates[:max_contracts]):
         #     logger.debug(f"  Candidate {i+1}: {c.ticker} (Liq: {c.liquidity_score:.1f}, Delta: {c.delta:.2f})")
             
-        return candidates[:max_contracts]
+        return candidates
