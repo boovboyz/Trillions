@@ -480,8 +480,8 @@ class TradingManager:
                         # Single-leg option
                         combined_execution_results[option_key] = result
                 
-                # Print Execution Summary Table using combined results
-                print_execution_summary(combined_execution_results)
+                # Print Execution Summary Table using ONLY stock execution results
+                print_execution_summary(stock_execution_results)
                 
                 # Print the dedicated Options Execution Summary if needed
                 if option_execution_results:

@@ -74,7 +74,17 @@ class OptionContract(BaseModel):
         option_type_str = details.get('contract_type')
 
         if not all([ticker, expiration_str, strike_price is not None, option_type_str]):
-            logger.warning(f"Skipping snapshot result due to missing basic details: {details}")
+            missing_fields = []
+            if not ticker:
+                missing_fields.append("ticker")
+            if not expiration_str:
+                missing_fields.append("expiration_date")
+            if strike_price is None:
+                missing_fields.append("strike_price")
+            if not option_type_str:
+                missing_fields.append("contract_type")
+            
+            logger.warning(f"Skipping snapshot result due to missing basic details: {', '.join(missing_fields)}")
             return None
 
         try:

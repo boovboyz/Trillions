@@ -311,46 +311,47 @@ def determine_options_strategy(
         ),
         (
             "human",
-            """Here is the analyst signals and current positions for ticker {ticker}:
-            
-            Analyst Signals:
-            ```json
-            {analyst_signals}
-            ```
-            
-            Current Stock Position:
-            ```json
-            {current_stock_position}
-            ```
-            
-            Current Option Positions:
-            ```json
-            {current_option_positions}
-            ```
-            
-            Determine the optimal options strategy for this scenario and return a strategy recommendation in this exact JSON format:
-            {{
-                "strategy_type": "long_call|long_put|none",
-                "confidence": float between 0 and 100,
-                "reasoning": "string with detailed explanation",
-                "max_days_to_expiration": integer (recommended DTE),
-                "ideal_delta": float between 0 and 1,
-                "price_target": float or null,
-                "stop_loss_percentage": float,
-                "take_profit_percentage": float,
-                "max_position_size_pct": float between 0 and 1
-            }}
-            
-            IMPORTANT: If you select "none" as the strategy_type because no options strategy is appropriate, you must still include values for all fields. For numeric fields, use:
-            - max_days_to_expiration: 30
-            - ideal_delta: 0.5
-            - stop_loss_percentage: 0.15
-            - take_profit_percentage: 0.25
-            - max_position_size_pct: 0.05
-            
-            Do not return null values for these fields when strategy_type is "none".
-            """
-        )
+            """IMPORTANT: PROVIDE ALL OUTPUT IN ENGLISH ONLY. DO NOT USE ANY NON-ENGLISH CHARACTERS OR TEXT.
+
+Here is the analyst signals and current positions for ticker {ticker}:
+
+Analyst Signals:
+```json
+{analyst_signals}
+```
+
+Current Stock Position:
+```json
+{current_stock_position}
+```
+
+Current Option Positions:
+```json
+{current_option_positions}
+```
+
+Determine the optimal options strategy for this scenario and return a strategy recommendation in this exact JSON format:
+{{
+    "strategy_type": "long_call|long_put|none",
+    "confidence": float between 0 and 100,
+    "reasoning": "string with detailed explanation",
+    "max_days_to_expiration": integer (recommended DTE),
+    "ideal_delta": float between 0 and 1,
+    "price_target": float or null,
+    "stop_loss_percentage": float,
+    "take_profit_percentage": float,
+    "max_position_size_pct": float between 0 and 1
+}}
+
+IMPORTANT: If you select "none" as the strategy_type because no options strategy is appropriate, you must still include values for all fields. For numeric fields, use:
+- max_days_to_expiration: 30
+- ideal_delta: 0.5
+- stop_loss_percentage: 0.15
+- take_profit_percentage: 0.25
+- max_position_size_pct: 0.05
+
+Do not return null values for these fields when strategy_type is "none".
+""")
     ])
     
     prompt = template.invoke({
@@ -426,7 +427,7 @@ def select_optimal_contract(
         contracts_data_for_llm.append(contract.model_dump(exclude_none=True))
     
     # System prompt for contract selection
-    system_prompt = """You are an options trading expert specializing in contract selection.
+    system_prompt = """You are an options trading expert specializing in contract selection. YOU MUST WRITE ALL OUTPUT IN ENGLISH ONLY. 
 
 Analyze the provided option contracts to select the one that best aligns with the determined strategy.
 Consider the following factors:
@@ -443,12 +444,20 @@ For existing positions, consider:
 - If they contradict the current strategy, consider closing positions
 - Look for opportunities to average down cost basis or take profits on winning positions
 
+CRITICAL INSTRUCTIONS:
+1. You MUST provide comprehensive reasoning of consistent length for ALL contracts, regardless of ticker. Do not abbreviate your analysis for any ticker. Your reasoning must be at least 150 words for each contract and cover all the key factors listed above. Consistency in detail across all tickers is essential.
+2. ALL OUTPUT MUST BE IN ENGLISH ONLY. Do not include any non-English characters or symbols.
+3. Use only actual data from the provided contracts. DO NOT HALLUCINATE or make up values that don't exist in the data.
+4. All numeric values must be valid numbers without any text mixed in. For example, use "0.5" not "0.5%" or "also0.5".
+5. Ensure proper JSON formatting with no errors or duplicate fields.
 """
 
     template = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human",
-         """Here is the options strategy, current positions, and candidate contracts for ticker {ticker}:
+         """IMPORTANT: PROVIDE ALL OUTPUT IN ENGLISH ONLY. DO NOT USE ANY NON-ENGLISH CHARACTERS OR TEXT.
+
+Here is the options strategy, current positions, and candidate contracts for ticker {ticker}:
 
 Options Strategy:
 ```json
@@ -478,7 +487,7 @@ Here is an example of the exact JSON format you must return:
     "expiration_date": "2024-12-31",
     "strategy": "long_call",
     "confidence": 85.5,
-    "reasoning": "This contract was selected due to its optimal delta, reasonable time to expiration, and good liquidity, aligning with the bullish strategy.",
+    "reasoning": "This contract was selected due to its optimal delta of 0.6, which closely aligns with our ideal delta target of 0.65 for this strategy. The expiration date of 2024-12-31 provides a 45-day timeframe that balances time decay concerns with sufficient duration for the expected price movement. The strike price is positioned strategically at 100.0, just 5% above the current price, offering an attractive risk-reward profile given our bullish outlook and price target of 115.0. The contract's implied volatility of 32% is reasonably valued compared to the 30-day historical volatility of 28%, suggesting fair pricing. Liquidity metrics are strong with a tight bid-ask spread of only $0.15 and daily volume exceeding 500 contracts. This supports ease of entry and exit. The theta value of -0.02 represents manageable time decay relative to the delta, indicating good time value preservation. The contract's vega of 0.1 provides moderate sensitivity to volatility changes, which aligns with our expectation of stable to slightly increasing volatility. Overall, this contract provides an optimal balance of directional exposure, reasonable premium cost, and favorable Greek metrics for our current market thesis and portfolio positioning.",
     "limit_price": 1.25,
     "stop_loss": 0.80,
     "take_profit": 2.50,
@@ -504,7 +513,7 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
     "expiration_date": "YYYY-MM-DD",
     "strategy": "{strategy_type}",
     "confidence": <float between 0 and 100>,
-    "reasoning": "Detailed explanation for choosing this contract.",
+    "reasoning": "Detailed explanation for choosing this contract that MUST be at least 150 words long. You MUST include analysis of: 1) why this specific strike price and expiration date is optimal, 2) discussion of the contract's delta and how it aligns with the strategy, 3) evaluation of the contract's liquidity and implied volatility, 4) risk-reward assessment, and 5) how this contract fits with the overall market outlook. Your reasoning MUST be comprehensive and consistent across all tickers.",
     "limit_price": <float>,
     "stop_loss": <float or null>,
     "take_profit": <float or null>,
@@ -518,6 +527,13 @@ Return ONLY the JSON object representing the chosen contract, adhering strictly 
 ```
 
 IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` and ending with `}}`, matching the structure above exactly. Do not include any text before or after the JSON object.
+
+CRITICAL FORMATTING REQUIREMENTS:
+1. ALL numeric values must be plain numbers without units or text (e.g., use 0.5 not "0.5%" or "approximately 0.5")
+2. Ensure expiration_date is in YYYY-MM-DD format exactly
+3. Use only ASCII characters in ALL fields, especially in the reasoning field
+4. Do not include any duplicate fields in the JSON
+5. Use proper JSON syntax with quotes around all string values
 """)
     ])
     
@@ -546,8 +562,78 @@ IMPORTANT: Ensure the output is a single, valid JSON object starting with `{{` a
 
     # Return the result directly as a dictionary if valid
     if llm_result:
-        # Convert to dictionary
-        result_dict = llm_result.model_dump()
-        return result_dict
+        try:
+            # Convert to dictionary
+            result_dict = llm_result.model_dump()
+            
+            # Sanitize the reasoning to ensure it's valid English text
+            if "reasoning" in result_dict:
+                # Remove any non-ASCII characters that could cause issues
+                import re
+                reasoning = result_dict["reasoning"]
+                # Replace non-ASCII characters with spaces
+                sanitized_reasoning = re.sub(r'[^\x00-\x7F]+', ' ', reasoning)
+                # Fix any double spaces created in the process
+                sanitized_reasoning = re.sub(r'\s+', ' ', sanitized_reasoning).strip()
+                result_dict["reasoning"] = sanitized_reasoning
+            
+            # Validate numeric fields are actually numeric
+            numeric_fields = ["confidence", "strike_price", "limit_price", "stop_loss", "take_profit"]
+            for field in numeric_fields:
+                if field in result_dict and result_dict[field] is not None:
+                    try:
+                        # Ensure it's a valid float
+                        result_dict[field] = float(result_dict[field])
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid numeric value for {field}, defaulting to None")
+                        result_dict[field] = None
+            
+            # Validate greeks are actually numeric
+            if "greeks" in result_dict and isinstance(result_dict["greeks"], dict):
+                for greek, value in list(result_dict["greeks"].items()):
+                    if value is not None:
+                        try:
+                            result_dict["greeks"][greek] = float(value)
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid numeric value for greek {greek}, defaulting to 0.0")
+                            result_dict["greeks"][greek] = 0.0
+            
+            # Validate that reasoning meets minimum length requirements
+            min_words = 100  # Aim for minimum 100 words
+            reasoning = result_dict.get("reasoning", "")
+            word_count = len(reasoning.split())
+            
+            if word_count < min_words:
+                logger.warning(f"Short reasoning detected for {ticker} ({word_count} words, minimum {min_words} expected). This may result in inconsistent analysis detail.")
+                
+                # Append note about truncated reasoning for transparency
+                if reasoning:
+                    result_dict["reasoning"] = f"{reasoning}\n\nNote: This analysis appears to be shorter than expected ({word_count} words). Future updates will provide more comprehensive analysis."
+            
+            return result_dict
+            
+        except Exception as e:
+            logger.error(f"Error processing LLM result for {ticker}: {e}")
+            # Return simplified valid contract with minimal information
+            return {
+                "ticker": llm_result.ticker if hasattr(llm_result, "ticker") else f"O:{ticker}",
+                "underlying_ticker": ticker,
+                "action": "buy",
+                "option_type": options_strategy.strategy_type.replace("long_", ""),
+                "strike_price": getattr(filtered_contracts[0], "strike_price", 0.0) if filtered_contracts else 0.0,
+                "expiration_date": getattr(filtered_contracts[0], "expiration_date", datetime.now()).strftime("%Y-%m-%d") if filtered_contracts else datetime.now().strftime("%Y-%m-%d"),
+                "strategy": options_strategy.strategy_type,
+                "confidence": 50.0,
+                "reasoning": "Error processing the detailed analysis. Using a simplified recommendation based on the strategy type and available contracts. The original analysis contained errors or invalid formatting.",
+                "limit_price": getattr(filtered_contracts[0], "last_price", 0.0) if filtered_contracts else 0.0,
+                "stop_loss": None,
+                "take_profit": None,
+                "greeks": {
+                    "delta": 0.0,
+                    "gamma": 0.0,
+                    "theta": 0.0,
+                    "vega": 0.0
+                }
+            }
     else:
         return None

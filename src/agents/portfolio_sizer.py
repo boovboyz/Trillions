@@ -51,18 +51,18 @@ class RobustPortfolioSizer:
         if action in ['sell', 'cover', 'close']:
             return self._calculate_closing_size(ticker, action, is_option)
             
-        # Get base risk percentage from config
-        base_risk_percent = self.config.get('risk_percent_per_trade', 1.0)  # Default 1%
+        # Get base risk percentage from config (dramatically increased to 8%)
+        base_risk_percent = self.config.get('risk_percent_per_trade', 8.0)  # Default now 8% (was 4%, originally 1%)
         
-        # Adjust risk based on confidence
-        confidence_factor = max(0.2, min(1.0, confidence / 100))
+        # Adjust risk based on confidence (increased floor from 0.2 to 0.5)
+        confidence_factor = max(0.5, min(1.2, confidence / 80))  # More aggressive confidence scaling with higher floor and ceiling
         
         # Risk percentage of portfolio for this trade (confidence-adjusted)
         risk_percent = base_risk_percent * confidence_factor * risk_multiplier
         
-        # For options, adjust risk further down (options are inherently leveraged)
+        # For options, significantly increase risk (options are inherently leveraged, but we want more aggressive sizing)
         if is_option:
-            options_risk_factor = self.config.get('options_risk_factor', 0.5)  # Default 50% of stock risk
+            options_risk_factor = self.config.get('options_risk_factor', 0.8)  # Increased to 80% of stock risk (was 50%)
             risk_percent *= options_risk_factor
             
         # Calculate dollar amount to risk
@@ -87,32 +87,34 @@ class RobustPortfolioSizer:
 
     def _calculate_volatility_factor(self, ticker: str) -> float:
         """
-        Calculate volatility adjustment factor.
+        Calculate volatility adjustment factor with minimal impact.
         
         Args:
             ticker: The ticker symbol
             
         Returns:
-            Volatility adjustment factor (lower for higher volatility)
+            Volatility adjustment factor (almost no reduction regardless of volatility)
         """
         try:
             # Get ATR or historical volatility
             volatility = self._get_asset_volatility(ticker)
             
-            # Define volatility thresholds
-            base_volatility = self.config.get('base_volatility', 20.0)  # Expected "normal" volatility
-            max_reduction = self.config.get('max_volatility_reduction', 0.7)  # Maximum reduction factor
+            # Define volatility thresholds with extremely minimal adjustments
+            base_volatility = self.config.get('base_volatility', 40.0)  # Much higher threshold to rarely trigger reduction
+            max_reduction = self.config.get('max_volatility_reduction', 0.15)  # Minimal reduction (was 0.4, originally 0.7)
             
-            # Calculate adjustment factor (inverse relationship)
+            # Calculate adjustment factor with extremely limited impact
             if volatility <= base_volatility:
                 return 1.0
             else:
-                # Reduce position size as volatility increases
-                reduction_factor = min(max_reduction, base_volatility / volatility)
+                # Apply cubic root to extremely flatten the reduction curve
+                ratio = base_volatility / volatility
+                # Barely reduce position size even with very high volatility
+                reduction_factor = min(max_reduction, 1.0 - (1.0 - ratio) * 0.2)
                 return max(1.0 - max_reduction, reduction_factor)
         except Exception as e:
             self.logger.warning(f"Error calculating volatility factor for {ticker}: {e}")
-            return 0.8  # Default to 80% if can't calculate volatility
+            return 0.95  # Default to 95% if can't calculate volatility (was 90%, originally 80%)
     
     def _get_asset_volatility(self, ticker: str) -> float:
         """
@@ -187,13 +189,13 @@ class RobustPortfolioSizer:
         buying_power = portfolio_state.get('buying_power', 0)
         positions = portfolio_state.get('positions', {})
         
-        # Get position limits from config
-        max_position_pct = self.config.get('max_position_size_pct', 0.15)  # Default 15%
+        # Get position limits from config (extremely aggressive sizing)
+        max_position_pct = self.config.get('max_position_size_pct', 0.50)  # Default increased to 50% (was 40%, originally 15%)
         if is_option:
-            max_position_pct = self.config.get('max_options_position_size_pct', 0.05)  # Default 5% for options
+            max_position_pct = self.config.get('max_options_position_size_pct', 0.35)  # Default massively increased to 35% for options (was 20%, originally 5%)
             
-        # Cash reserve (% of portfolio to keep as cash)
-        cash_reserve_pct = self.config.get('cash_reserve_pct', 0.10)  # Default 10%
+        # Cash reserve (% of portfolio to keep as cash) - minimal reserve
+        cash_reserve_pct = self.config.get('cash_reserve_pct', 0.02)  # Default reduced to just 2% (was 5%, originally 10%)
         cash_reserve = portfolio_value * cash_reserve_pct
         available_cash = max(0, cash - cash_reserve)
         
