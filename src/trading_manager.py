@@ -219,11 +219,24 @@ class TradingManager:
         if self.enable_supabase:
             try:
                 self.supabase_client = get_supabase_client()
-                logger.info("Supabase integration enabled for data storage")
+                
+                # Test the connection
+                connection_test = self.supabase_client.test_connection()
+                if connection_test["status"] == "success":
+                    logger.info("Supabase integration enabled and connection verified")
+                else:
+                    logger.warning(f"Supabase connection test failed: {connection_test['message']}")
+                    print(f"\n{Fore.YELLOW}WARNING: Supabase connection failed. Continuing with local storage only.{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}Error: {connection_test['message']}{Style.RESET_ALL}")
+                    self.enable_supabase = False
+                    self.supabase_client = None
+                    
             except Exception as e:
-                logger.error(f"Failed to initialize Supabase client: {str(e)}")
-                print(f"\n{Fore.YELLOW}WARNING: Supabase initialization failed. Data will not be stored in Supabase. Error: {str(e)}{Style.RESET_ALL}")
+                logger.warning(f"Failed to initialize Supabase client: {str(e)}")
+                print(f"\n{Fore.YELLOW}WARNING: Supabase initialization failed. Continuing with local storage only.{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Error: {str(e)}{Style.RESET_ALL}")
                 self.enable_supabase = False
+                self.supabase_client = None
         
         logger.info("Trading Manager initialized with tickers: %s", tickers)
         
@@ -350,6 +363,14 @@ class TradingManager:
         try:
             # Update last run time
             self.last_trading_run = datetime.now()
+            
+            # Clear old market data to ensure fresh analysis (preserve position management data)
+            try:
+                cache = get_cache()
+                cache.clear_old_market_data(hours_old=1)
+                logger.info("Cleared market data older than 1 hour to ensure fresh analysis")
+            except Exception as e:
+                logger.warning(f"Failed to clear old market data: {e}")
             
             # Get current portfolio state from Alpaca
             try:
@@ -565,7 +586,7 @@ class TradingManager:
         finally:
             # Schedule position management to run 3 minutes after this cycle finishes
             if cycle_result and cycle_result['status'] != 'skipped':
-                delay_minutes = 3
+                delay_minutes = 1
                 run_time = datetime.now() + timedelta(minutes=delay_minutes)
                 self.pending_pos_mgmt_time = run_time
                 logger.info(f"Trading cycle finished. Scheduling position management to run at {run_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -624,7 +645,7 @@ class TradingManager:
                     else:
                         logger.warning(f"Failed to store position management data in Supabase: {supabase_result.get('message')}")
                 except Exception as e:
-                    logger.error(f"Error storing position management data in Supabase: {str(e)}")
+                    logger.warning(f"Supabase position management storage failed, continuing with local storage only: {str(e)}")
             
             # Log results
             if execution_results:
@@ -681,7 +702,7 @@ class TradingManager:
                 else:
                     logger.warning(f"Failed to store trading cycle data in Supabase: {supabase_result.get('message')}")
             except Exception as e:
-                logger.error(f"Error storing trading cycle data in Supabase: {str(e)}")
+                logger.warning(f"Supabase storage failed, continuing with local storage only: {str(e)}")
 
 
 def select_model():

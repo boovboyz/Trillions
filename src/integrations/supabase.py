@@ -151,6 +151,27 @@ class DirectSupabaseClient:
             logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
     
+    def test_connection(self) -> Dict[str, Any]:
+        """
+        Test the connection to Supabase.
+        
+        Returns:
+            Dict with connection test results
+        """
+        try:
+            # Simple health check - try to get schema info
+            response = requests.get(f"{self.rest_url}/", headers=self.headers, timeout=10)
+            if response.status_code == 200:
+                return {"status": "success", "message": "Connection successful"}
+            else:
+                return {"status": "error", "message": f"HTTP {response.status_code}: {response.text}"}
+        except requests.exceptions.ConnectionError as e:
+            return {"status": "error", "message": f"Connection failed: {str(e)}"}
+        except requests.exceptions.Timeout as e:
+            return {"status": "error", "message": f"Connection timeout: {str(e)}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+    
     def insert(self, table: str, data: Dict) -> Dict:
         """
         Insert data into a table.

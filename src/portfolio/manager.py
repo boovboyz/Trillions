@@ -80,7 +80,21 @@ class PortfolioManager:
             'options_risk_factor': 0.5,                 # Factor to reduce options risk (vs stocks)
             'base_volatility': 20.0,                    # Base volatility level for adjustment
             'max_volatility_reduction': 0.7,            # Maximum reduction for high volatility
-            'options_allocation_pct': 0.15              # Maximum allocation to options
+            'options_allocation_pct': 0.15,             # Maximum allocation to options
+            # Enhanced position management parameters
+            'profit_scale_out_levels': [                # Systematic profit-taking levels
+                {'pnl_pct': 10, 'qty_pct': 25},         # Take 25% at 10% profit
+                {'pnl_pct': 20, 'qty_pct': 33},         # Take 33% at 20% profit
+                {'pnl_pct': 30, 'qty_pct': 50},         # Take 50% at 30% profit
+                {'pnl_pct': 50, 'qty_pct': 100},        # Take all at 50% profit
+            ],
+            'loss_scale_in_threshold': -10,             # Scale in at -10% loss
+            'loss_scale_out_threshold': -15,            # Reduce position at -15% loss
+            'trailing_stop_activation': 15,             # Activate trailing at 15% profit
+            'trailing_stop_distance': 5,                # Trail by 5% from high
+            'momentum_scale_threshold': 5,              # Scale on 5% momentum
+            'max_scale_count': 3,                       # Max 3 scale-ins per position
+            'min_scale_interval': 4,                    # Min 4 hours between scales
         }
         
         # Override defaults with provided config

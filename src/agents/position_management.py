@@ -21,6 +21,7 @@ import re
 
 from src.utils.llm import call_llm
 from src.utils.progress import progress
+from src.data.cache import get_cache
 
 class PositionAction(BaseModel):
     """Model for position management actions."""
@@ -51,11 +52,29 @@ class PositionManagementAgent:
         self.polygon = polygon_client
         self.portfolio_cache = portfolio_cache
         self.logger = logging.getLogger(__name__)
+        self.cache = get_cache()  # Get cache instance for position tracking
         self.logger.info("PositionManagementAgent initialized.")
+        
+        # Enhanced configuration with new parameters
+        self.scaling_config = {
+            'profit_scale_out_levels': config.get('profit_scale_out_levels', [
+                {'pnl_pct': 10, 'qty_pct': 25},   # Take 25% at 10% profit
+                {'pnl_pct': 20, 'qty_pct': 33},   # Take 33% at 20% profit
+                {'pnl_pct': 30, 'qty_pct': 50},   # Take 50% at 30% profit
+                {'pnl_pct': 50, 'qty_pct': 100},  # Take all at 50% profit
+            ]),
+            'loss_scale_in_threshold': config.get('loss_scale_in_threshold', -10),  # Scale in at -10%
+            'loss_scale_out_threshold': config.get('loss_scale_out_threshold', -15), # Reduce at -15%
+            'trailing_stop_activation': config.get('trailing_stop_activation', 15),  # Activate at 15% profit
+            'trailing_stop_distance': config.get('trailing_stop_distance', 5),       # Trail by 5%
+            'momentum_scale_threshold': config.get('momentum_scale_threshold', 5),   # Scale on 5% momentum
+            'max_scale_count': config.get('max_scale_count', 3),                    # Max 3 scale-ins
+            'min_scale_interval': config.get('min_scale_interval', 4),              # Hours between scales
+        }
         
     def manage_positions(self, model_name: str, model_provider: str) -> Dict[str, Any]:
         """
-        Analyze current positions and generate management actions.
+        Analyze current positions and generate management actions with enhanced logic.
         
         Args:
             model_name: LLM model name
@@ -64,7 +83,7 @@ class PositionManagementAgent:
         Returns:
             Dictionary with management actions
         """
-        self.logger.info("Starting position management analysis")
+        self.logger.info("Starting enhanced position management analysis")
         
         # Get current portfolio state
         portfolio_state = None
@@ -215,10 +234,93 @@ class PositionManagementAgent:
             self.logger.warning(f"Position management encountered {result['_summary']['errors']} errors during analysis.")
         
         return result
+    
+    def _sync_position_with_db(self, ticker: str, position: Dict[str, Any]) -> int:
+        """
+        Sync a position with the database, creating or updating as needed.
+        
+        Args:
+            ticker: Position ticker
+            position: Position data from portfolio
+            
+        Returns:
+            Position ID in the database
+        """
+        # Check if we have an active position in DB
+        db_position = self.cache.get_active_position(ticker)
+        
+        position_type = 'option' if self._is_option_symbol(ticker) else 'stock'
+        side = position.get('side', 'long')
+        entry_price = float(position.get('avg_entry_price', 0))
+        current_price = float(position.get('current_price', 0))
+        quantity = abs(int(position.get('qty', 0)))
+        
+        if db_position:
+            # Update existing position
+            position_id = db_position['id']
+            self.cache.update_position_price(position_id, current_price)
+            
+            # Check if quantity changed (partial fill or scale)
+            if db_position['quantity'] != quantity:
+                self.logger.info(f"Position quantity changed for {ticker}: {db_position['quantity']} -> {quantity}")
+                # Record the change as an action
+                self.cache.record_position_action(
+                    position_id=position_id,
+                    action='quantity_change',
+                    ticker=ticker,
+                    quantity=quantity - db_position['quantity'],
+                    price=current_price,
+                    reason='Position quantity changed (fill or manual adjustment)'
+                )
+        else:
+            # Create new position tracking
+            self.logger.info(f"Creating new position tracking for {ticker}")
+            
+            # Calculate initial stops based on config
+            stop_loss_pct = self.config.get('stop_loss_pct', 0.25) if position_type == 'option' else self.config.get('stock_stop_loss_pct', 0.05)
+            profit_target_pct = self.config.get('profit_target_pct', 0.50) if position_type == 'option' else self.config.get('stock_profit_target_pct', 0.15)
+            
+            if side == 'long':
+                stop_loss = entry_price * (1 - stop_loss_pct)
+                take_profit = entry_price * (1 + profit_target_pct)
+            else:  # short
+                stop_loss = entry_price * (1 + stop_loss_pct)
+                take_profit = entry_price * (1 - profit_target_pct)
+            
+            position_id = self.cache.create_position_tracking(
+                ticker=ticker,
+                position_type=position_type,
+                side=side,
+                entry_price=entry_price,
+                quantity=quantity,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                additional_data={
+                    'underlying': position.get('underlying'),
+                    'option_type': position.get('option_type'),
+                    'strike_price': position.get('strike_price'),
+                    'expiration_date': position.get('expiration_date'),
+                }
+            )
+            
+            # Create profit-taking levels for new positions
+            if side == 'long' and self.scaling_config['profit_scale_out_levels']:
+                profit_levels = []
+                for level in self.scaling_config['profit_scale_out_levels']:
+                    target_price = entry_price * (1 + level['pnl_pct'] / 100)
+                    profit_levels.append({
+                        'pnl_percent': level['pnl_pct'],
+                        'target_price': target_price,
+                        'quantity_percent': level['qty_pct']
+                    })
+                self.cache.create_profit_levels(ticker, position_id, profit_levels)
+                self.logger.info(f"Created {len(profit_levels)} profit-taking levels for {ticker}")
+        
+        return position_id
         
     def _get_position_metrics(self, ticker: str, position: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Calculate performance metrics for a position.
+        Calculate enhanced performance metrics for a position including DB tracking.
         
         Args:
             ticker: The ticker symbol (stock or option)
@@ -228,6 +330,25 @@ class PositionManagementAgent:
             Dictionary with performance metrics
         """
         metrics = {}
+        
+        # Sync with database and get position ID
+        position_id = self._sync_position_with_db(ticker, position)
+        metrics['position_id'] = position_id
+        
+        # Get DB position for enhanced tracking
+        db_position = self.cache.get_active_position(ticker)
+        if db_position:
+            metrics['db_position'] = db_position
+            metrics['scale_count'] = db_position.get('scale_count', 0)
+            metrics['highest_price'] = db_position.get('highest_price')
+            metrics['lowest_price'] = db_position.get('lowest_price')
+            metrics['trailing_stop_active'] = db_position.get('trailing_stop_active', False)
+            metrics['last_scale_price'] = db_position.get('last_scale_price')
+            
+            # Get profit levels
+            profit_levels = self.cache.get_profit_levels(position_id)
+            metrics['profit_levels'] = profit_levels
+            metrics['next_profit_level'] = profit_levels[0] if profit_levels else None
         
         # Extract basic position data
         side = position.get('side', 'long')
@@ -388,14 +509,89 @@ class PositionManagementAgent:
             metrics['stop_price'] = 0
             metrics['target_price'] = 0
             
-        # Additional metrics for trailing stop if configured (based on option price)
+        # Additional metrics for trailing stop if configured
         metrics['effective_stop'] = metrics.get('stop_price', 0) # Default to initial stop
-        # Trailing stop for options is tricky due to theta decay and volatility. 
-        # A simple ATR based on option price is often not reliable.
-        # We will rely on the initial percentage stop or the LLM's discretion for now.
-        # We could potentially base a trailing stop on the underlying's ATR if needed later.
+        
+        # Enhanced trailing stop logic
+        if db_position and db_position.get('trailing_stop_active'):
+            trailing_distance = db_position.get('trailing_stop_distance', self.scaling_config['trailing_stop_distance'])
+            if side == 'long' and metrics.get('highest_price'):
+                metrics['effective_stop'] = metrics['highest_price'] * (1 - trailing_distance / 100)
+            elif side == 'short' and metrics.get('lowest_price'):
+                metrics['effective_stop'] = metrics['lowest_price'] * (1 + trailing_distance / 100)
+        
+        # Check if trailing stop should be activated
+        elif profit_loss_pct >= self.scaling_config['trailing_stop_activation']:
+            metrics['should_activate_trailing'] = True
+            
+        # Scaling analysis
+        metrics['scaling_analysis'] = self._analyze_scaling_opportunity(
+            ticker, position, metrics, profit_loss_pct
+        )
             
         return metrics
+    
+    def _analyze_scaling_opportunity(self, ticker: str, position: Dict[str, Any], 
+                                   metrics: Dict[str, Any], pnl_pct: float) -> Dict[str, Any]:
+        """
+        Analyze if position should be scaled based on performance and momentum.
+        
+        Returns:
+            Dictionary with scaling recommendations
+        """
+        analysis = {
+            'should_scale_in': False,
+            'should_scale_out': False,
+            'scale_reason': None,
+            'scale_size': 0
+        }
+        
+        side = position.get('side', 'long')
+        scale_count = metrics.get('scale_count', 0)
+        last_scale_price = metrics.get('last_scale_price')
+        current_price = float(position.get('current_price', 0))
+        
+        # Check scale-in opportunities
+        if scale_count < self.scaling_config['max_scale_count']:
+            # Loss-based scale-in
+            if pnl_pct <= self.scaling_config['loss_scale_in_threshold']:
+                # Check if enough price movement since last scale
+                if not last_scale_price or abs((current_price - last_scale_price) / last_scale_price) > 0.05:
+                    analysis['should_scale_in'] = True
+                    analysis['scale_reason'] = f"Position down {pnl_pct:.1f}%, opportunity to average down"
+                    analysis['scale_size'] = 0.5  # Scale in with 50% of current position
+            
+            # Momentum-based scale-in (for winning positions)
+            elif pnl_pct > self.scaling_config['momentum_scale_threshold']:
+                # Check technical momentum
+                technical = metrics.get('technical', {})
+                trends = metrics.get('trends', {})
+                
+                momentum_signals = 0
+                if trends.get('ma_cross') == 'bullish': momentum_signals += 1
+                if trends.get('macd') == 'bullish': momentum_signals += 1
+                if technical.get('rsi', 50) > 50 and technical.get('rsi', 50) < 70: momentum_signals += 1
+                
+                if momentum_signals >= 2:
+                    analysis['should_scale_in'] = True
+                    analysis['scale_reason'] = f"Strong momentum with {momentum_signals} bullish signals"
+                    analysis['scale_size'] = 0.3  # Scale in with 30% for momentum
+        
+        # Check scale-out opportunities (profit-taking)
+        if metrics.get('next_profit_level'):
+            next_level = metrics['next_profit_level']
+            if pnl_pct >= next_level['target_pnl_percent']:
+                analysis['should_scale_out'] = True
+                analysis['scale_reason'] = f"Reached profit level {next_level['level_number']} at {pnl_pct:.1f}%"
+                analysis['scale_size'] = next_level['quantity_percent'] / 100
+        
+        # Emergency scale-out for excessive losses
+        elif pnl_pct <= self.scaling_config['loss_scale_out_threshold']:
+            analysis['should_scale_out'] = True
+            analysis['scale_reason'] = f"Risk reduction due to {pnl_pct:.1f}% loss"
+            analysis['scale_size'] = 0.5  # Reduce position by 50%
+        
+        return analysis
         
     def _analyze_position(
         self,
@@ -424,35 +620,56 @@ class PositionManagementAgent:
         template = ChatPromptTemplate.from_messages([
             (
                 "system",
-                """You are an expert portfolio manager specializing in position management and risk control.
+                """You are an expert portfolio manager specializing in dynamic position management and systematic profit optimization.
 
-Your task is to analyze a current position and determine optimal actions to manage it based on performance metrics, technical indicators, and risk management principles.
+Your task is to analyze a current position and determine optimal actions to maximize profits while minimizing losses through intelligent position scaling and risk management.
 
 Consider the following actions:
-1. scale_in: Add to the position if it shows potential for further gains or to average down cost basis
-2. scale_out: Partially reduce the position to lock in profits
+1. scale_in: Add to the position based on momentum or to improve cost basis
+2. scale_out: Partially reduce the position to lock in profits or reduce risk
 3. stop_loss: Exit the position completely to prevent further losses
 4. take_profit: Exit the position completely to realize gains
-5. adjust_stop: Modify the stop loss level based on current price action
+5. adjust_stop: Modify the stop loss level (including trailing stop activation)
 6. adjust_target: Modify the profit target based on current price action
 7. hold: Make no changes to the current position
 
-When analyzing the position, consider:
-1. Current profit/loss percentage
-2. Technical indicators (moving averages, RSI, MACD, Bollinger Bands)
-3. Price trends and momentum
-4. Volatility and risk metrics
-5. Position relative to stop loss and profit targets
-6. Related options positions if present
+ENHANCED ANALYSIS FRAMEWORK:
+1. Scaling Analysis:
+   - Review the scaling_analysis in metrics for automatic recommendations
+   - Consider scale count and last scale price to avoid over-scaling
+   - For losses: Consider averaging down if fundamentals remain strong
+   - For profits: Follow systematic profit-taking levels
+   
+2. Trailing Stop Management:
+   - Activate trailing stops after 15% profit (configurable)
+   - Adjust stops to lock in gains while allowing upside
+   - Consider volatility when setting trailing distances
+   
+3. Profit Taking Strategy:
+   - Check profit_levels for systematic exit points
+   - Take partial profits at predetermined levels (10%, 20%, 30%, 50%)
+   - Balance between letting winners run and securing gains
+   
+4. Risk Management:
+   - Monitor effective stop levels (may differ from initial stops)
+   - Consider position size relative to portfolio
+   - Account for correlation with other positions
 
-Return a PositionManagementResult object with a list of actions to take.
+5. Technical Confirmation:
+   - Use technical indicators to confirm scaling decisions
+   - Look for momentum signals when adding to winners
+   - Identify reversal signals for exit timing
+
+Return a PositionManagementResult object with prioritized actions.
 Each action should include:
 - ticker: The ticker symbol
 - action: One of the actions listed above
-- reason: Detailed explanation for the action
+- reason: Detailed explanation incorporating the enhanced analysis
 - confidence: Confidence level (0-100)
-- quantity: Number of shares/contracts (for scale_in or scale_out) - MUST BE A WHOLE INTEGER, NOT A DECIMAL
+- quantity: Number of shares/contracts (for scale_in or scale_out) - MUST BE A WHOLE INTEGER
 - price_target: Target price (for adjust_stop or adjust_target)
+
+IMPORTANT: Consider the scaling_analysis recommendations but use your judgment to confirm or override based on the full context.
 """
             ),
             (
@@ -544,9 +761,43 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 self.logger.error(f"LLM call for position management of {ticker} returned None.")
                 return create_default_result()
             
-            # Validate result - ensure quantities are integers
+            # Validate result - ensure quantities are integers and price_target is provided when needed
             if result.actions:
                 for action in result.actions:
+                    # Validate price_target for adjust actions
+                    if action.action in ['adjust_stop', 'adjust_target'] and action.price_target is None:
+                        self.logger.warning(f"LLM did not provide price_target for {action.action} on {ticker}")
+                        # Try to calculate a reasonable price_target based on current price and position
+                        current_price = float(position.get('current_price', 0))
+                        entry_price = float(position.get('avg_entry_price', 0))
+                        if current_price > 0:
+                            if action.action == 'adjust_stop':
+                                # Set stop at 5% below current for long, 5% above for short
+                                if position.get('side', 'long') == 'long':
+                                    action.price_target = current_price * 0.95
+                                else:
+                                    action.price_target = current_price * 1.05
+                                self.logger.info(f"Set default stop price to {action.price_target:.2f} for {ticker}")
+                            elif action.action == 'adjust_target':
+                                # Set target based on profit level or default percentage
+                                pnl_pct = position.get('unrealized_pl_percent', 0)
+                                if position.get('side', 'long') == 'long':
+                                    # If already profitable, set target 10% above current
+                                    if pnl_pct > 10:
+                                        action.price_target = current_price * 1.10
+                                    else:
+                                        # Otherwise use entry price + 15% (stocks) or 30% (options)
+                                        target_pct = 0.30 if self._is_option_symbol(ticker) else 0.15
+                                        action.price_target = entry_price * (1 + target_pct) if entry_price > 0 else current_price * 1.15
+                                else:
+                                    # Short position
+                                    if pnl_pct > 10:
+                                        action.price_target = current_price * 0.90
+                                    else:
+                                        target_pct = 0.30 if self._is_option_symbol(ticker) else 0.15
+                                        action.price_target = entry_price * (1 - target_pct) if entry_price > 0 else current_price * 0.85
+                                self.logger.info(f"Set default target price to {action.price_target:.2f} for {ticker}")
+                    
                     # If quantity is a float, convert it to an integer
                     if action.quantity is not None and isinstance(action.quantity, float):
                         position_qty = abs(int(position.get('qty', 0)))
@@ -595,6 +846,12 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
         side = position.get('side', 'unknown')
         if side == 'unknown':
             return False, f"Position {ticker} has unknown side"
+        
+        # For scaling out actions, check we have sufficient quantity
+        if action in ['scale_out', 'stop_loss', 'take_profit']:
+            abs_qty = abs(qty)
+            if abs_qty <= 0:
+                return False, f"Cannot {action} on {ticker} - insufficient quantity available ({abs_qty})"
             
         # For take_profit, verify we have a profit
         if action == 'take_profit':
@@ -761,17 +1018,52 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                     # Handle stop adjustment (update stops in the system)
                     price_target = action_dict.get('price_target')
                     if price_target:
-                        # Implement stop adjustment logic here
-                        execution_results[ticker].append({
-                            'action': 'adjust_stop',
-                            'status': 'SUCCESS',
-                            'message': action_dict.get('reason', f"adjust_stop set to {price_target} for {ticker}"),
-                            'details': {
-                                'ticker': ticker,
+                        # Update stop in database
+                        db_position = self.cache.get_active_position(ticker)
+                        if db_position:
+                            position_id = db_position['id']
+                            
+                            # Check if we should activate trailing stop
+                            pnl_pct = position.get('unrealized_pl_percent', 0)
+                            trailing_active = pnl_pct >= self.scaling_config['trailing_stop_activation']
+                            
+                            self.cache.update_position_stops(
+                                position_id=position_id,
+                                stop_loss=price_target,
+                                trailing_stop_active=trailing_active,
+                                trailing_stop_distance=self.scaling_config['trailing_stop_distance'] if trailing_active else None
+                            )
+                            
+                            # Record the action
+                            action_id = self.cache.record_position_action(
+                                position_id=position_id,
+                                action='adjust_stop',
+                                ticker=ticker,
+                                price=price_target,
+                                reason=action_dict.get('reason', f"Stop adjusted to {price_target}"),
+                                confidence=confidence
+                            )
+                            
+                            self.cache.update_action_result(action_id, True, 'success')
+                            
+                            execution_results[ticker].append({
                                 'action': 'adjust_stop',
-                                'price_target': price_target
-                            }
-                        })
+                                'status': 'SUCCESS',
+                                'message': f"Stop adjusted to {price_target}" + (" with trailing stop" if trailing_active else ""),
+                                'details': {
+                                    'ticker': ticker,
+                                    'action': 'adjust_stop',
+                                    'price_target': price_target,
+                                    'trailing_active': trailing_active
+                                }
+                            })
+                        else:
+                            execution_results[ticker].append({
+                                'action': 'adjust_stop',
+                                'status': 'ERROR',
+                                'message': f"No active position found in database for {ticker}",
+                                'details': None
+                            })
                     else:
                         execution_results[ticker].append({
                             'action': 'adjust_stop',
@@ -783,6 +1075,28 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 elif action == 'adjust_target':
                     # Handle target adjustment (update take profit targets in the system)
                     price_target = action_dict.get('price_target')
+                    if not price_target:
+                        # Calculate a reasonable default target based on current position
+                        self.logger.warning(f"No price target provided for adjust_target on {ticker}, calculating default")
+                        current_price = float(position.get('current_price', 0))
+                        entry_price = float(position.get('avg_entry_price', 0))
+                        pnl_pct = position.get('unrealized_pl_percent', 0)
+                        
+                        if current_price > 0 and entry_price > 0:
+                            # For options, use more aggressive targets
+                            if is_option:
+                                target_multiplier = 1.30 if position.get('side', 'long') == 'long' else 0.70
+                            else:
+                                target_multiplier = 1.15 if position.get('side', 'long') == 'long' else 0.85
+                            
+                            # If already profitable, set target higher than current
+                            if pnl_pct > 10:
+                                price_target = current_price * 1.10 if position.get('side', 'long') == 'long' else current_price * 0.90
+                            else:
+                                price_target = entry_price * target_multiplier
+                            
+                            self.logger.info(f"Calculated default target price {price_target:.2f} for {ticker}")
+                    
                     if price_target:
                         # Execute the adjustment using the existing helper method
                         result = self._execute_adjustment_action(
@@ -801,7 +1115,7 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                         execution_results[ticker].append({
                             'action': 'adjust_target',
                             'status': 'ERROR',
-                            'message': f"No price target specified for adjust_target on {ticker}",
+                            'message': f"Unable to determine target price for {ticker} (no current/entry price)",
                             'details': None
                         })
                         
@@ -1119,6 +1433,14 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
         trade_action = None
         trade_qty = 0
         
+        # Validate position quantity first
+        if position_qty <= 0:
+            return {
+                'status': 'ERROR',
+                'message': f"Invalid position quantity ({position_qty}) for {ticker}",
+                'order': None
+            }
+        
         # === STOCK-SPECIFIC ACTIONS ===
         if not is_option:
             # For stocks: use buy/sell for long and short/cover for short
@@ -1129,6 +1451,15 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 trade_action = 'sell' if side == 'long' else 'cover'
                 trade_qty = quantity if quantity is not None else max(1, int(position_qty * self.config.get('scaling_size_pct', 0.30)))
                 trade_qty = min(trade_qty, position_qty) # Ensure not scaling out more than held
+                
+                # Additional safety check
+                if trade_qty > position_qty:
+                    return {
+                        'status': 'ERROR',
+                        'message': f"Cannot scale out {trade_qty} {ticker} shares - only {position_qty} available",
+                        'order': None
+                    }
+                    
             elif action in ['stop_loss', 'take_profit']:
                 trade_action = 'sell' if side == 'long' else 'cover'
                 trade_qty = position_qty  # Full position
@@ -1154,6 +1485,14 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 else:  # scale_out
                     trade_qty = quantity if quantity is not None else max(1, int(position_qty * self.config.get('scaling_size_pct', 0.30)))
                     trade_qty = min(trade_qty, position_qty)  # Ensure not scaling out more than held
+                    
+                    # Additional safety check for options
+                    if trade_qty > position_qty:
+                        return {
+                            'status': 'ERROR',
+                            'message': f"Cannot scale out {trade_qty} {ticker} contracts - only {position_qty} available",
+                            'order': None
+                        }
         
         if not trade_action or trade_qty <= 0:
             return {
@@ -1171,6 +1510,24 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
         }
         
         self.logger.info(f"Executing {trade_action} for {trade_qty} {ticker} {'contracts' if is_option else 'shares'}")
+        
+        # Get position ID for database tracking
+        db_position = self.cache.get_active_position(ticker)
+        position_id = db_position['id'] if db_position else None
+        
+        # Record the intended action
+        action_id = None
+        if position_id:
+            action_id = self.cache.record_position_action(
+                position_id=position_id,
+                action=action,
+                ticker=ticker,
+                quantity=trade_qty,
+                price=float(position.get('current_price', 0)),
+                reason=reason,
+                confidence=confidence,
+                result='pending'
+            )
         
         # --- Execute the trade --- 
         try:
@@ -1213,6 +1570,38 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                     else:
                         status = 'PENDING'
                         
+                    # Update database records
+                    if action_id and status == 'EXECUTED':
+                        self.cache.update_action_result(action_id, True, 'success', 
+                                                      ticker_result.get('order', {}).get('id'))
+                        
+                        # Update position tracking
+                        if action in ['stop_loss', 'take_profit'] and position_id:
+                            close_price = float(position.get('current_price', 0))
+                            self.cache.close_position(position_id, action, close_price)
+                        elif action == 'scale_in' and position_id:
+                            # Update scale count and last scale price
+                            current_price = float(position.get('current_price', 0))
+                            with self.cache.lock, self.cache.conn:
+                                self.cache.conn.execute(
+                                    """UPDATE position_tracking 
+                                    SET scale_count = scale_count + 1, 
+                                        last_scale_price = ?
+                                    WHERE id = ?""",
+                                    (current_price, position_id)
+                                )
+                        elif action == 'scale_out' and position_id:
+                            # Check if this was a profit level trigger
+                            current_price = float(position.get('current_price', 0))
+                            pnl_pct = position.get('unrealized_pl_percent', 0)
+                            profit_levels = self.cache.get_profit_levels(position_id)
+                            for level in profit_levels:
+                                if abs(pnl_pct - level['target_pnl_percent']) < 2:  # Within 2% tolerance
+                                    self.cache.trigger_profit_level(level['id'], current_price)
+                                    break
+                    elif action_id:
+                        self.cache.update_action_result(action_id, False, status.lower())
+                    
                     return {
                         'status': status,
                         'message': ticker_result.get('message', 'Option order executed'),
@@ -1249,6 +1638,38 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 else:
                     status = 'PENDING'
                     
+                # Update database records
+                if action_id and status == 'EXECUTED':
+                    self.cache.update_action_result(action_id, True, 'success', 
+                                                  ticker_result.get('order', {}).get('id'))
+                    
+                    # Update position tracking
+                    if action in ['stop_loss', 'take_profit'] and position_id:
+                        close_price = float(position.get('current_price', 0))
+                        self.cache.close_position(position_id, action, close_price)
+                    elif action == 'scale_in' and position_id:
+                        # Update scale count and last scale price
+                        current_price = float(position.get('current_price', 0))
+                        with self.cache.lock, self.cache.conn:
+                            self.cache.conn.execute(
+                                """UPDATE position_tracking 
+                                SET scale_count = scale_count + 1, 
+                                    last_scale_price = ?
+                                WHERE id = ?""",
+                                (current_price, position_id)
+                            )
+                    elif action == 'scale_out' and position_id:
+                        # Check if this was a profit level trigger
+                        current_price = float(position.get('current_price', 0))
+                        pnl_pct = position.get('unrealized_pl_percent', 0)
+                        profit_levels = self.cache.get_profit_levels(position_id)
+                        for level in profit_levels:
+                            if abs(pnl_pct - level['target_pnl_percent']) < 2:  # Within 2% tolerance
+                                self.cache.trigger_profit_level(level['id'], current_price)
+                                break
+                elif action_id:
+                    self.cache.update_action_result(action_id, False, status.lower())
+                
                 return {
                     'status': status,
                     'message': ticker_result.get('message', 'Stock order executed'),
@@ -1283,9 +1704,28 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 'details': None
             }
             
-        # Here we would typically update a stop loss or take profit order
-        # This depends on the brokerage implementation
-        # For now, we'll just return a placeholder result
+        # Update database tracking
+        db_position = self.cache.get_active_position(ticker)
+        if db_position:
+            position_id = db_position['id']
+            
+            if action == 'adjust_target':
+                self.cache.update_position_stops(
+                    position_id=position_id,
+                    take_profit=price_target
+                )
+            
+            # Record the action
+            action_id = self.cache.record_position_action(
+                position_id=position_id,
+                action=action,
+                ticker=ticker,
+                price=price_target,
+                reason=reason,
+                result='success'
+            )
+            
+            self.cache.update_action_result(action_id, True, 'success')
         
         return {
             'status': 'SUCCESS',
@@ -1295,4 +1735,71 @@ You can recommend multiple actions if needed, but ensure they are consistent wit
                 'action': action,
                 'price_target': price_target
             }
-        } 
+        }
+    
+    def get_position_summary(self, ticker: str = None) -> Dict[str, Any]:
+        """
+        Get enhanced position summary including history and performance metrics.
+        
+        Args:
+            ticker: Optional ticker to filter by
+            
+        Returns:
+            Dictionary with position summaries
+        """
+        positions = self.cache.get_position_history(ticker, days=30)
+        
+        summary = {
+            'active_positions': [],
+            'closed_positions': [],
+            'total_pnl': 0,
+            'win_rate': 0,
+            'average_win': 0,
+            'average_loss': 0,
+            'best_trade': None,
+            'worst_trade': None
+        }
+        
+        wins = []
+        losses = []
+        
+        for pos in positions:
+            if pos['status'] == 'active':
+                summary['active_positions'].append({
+                    'ticker': pos['ticker'],
+                    'entry_price': pos['entry_price'],
+                    'current_price': pos['current_price'],
+                    'quantity': pos['quantity'],
+                    'pnl_percent': ((pos['current_price'] / pos['entry_price']) - 1) * 100 if pos['side'] == 'long' else ((pos['entry_price'] / pos['current_price']) - 1) * 100,
+                    'scale_count': pos['scale_count'],
+                    'trailing_stop_active': pos['trailing_stop_active']
+                })
+            else:
+                summary['closed_positions'].append({
+                    'ticker': pos['ticker'],
+                    'pnl': pos['pnl'],
+                    'pnl_percent': pos['pnl_percent'],
+                    'close_reason': pos['close_reason'],
+                    'close_timestamp': pos['close_timestamp']
+                })
+                
+                summary['total_pnl'] += pos['pnl'] or 0
+                
+                if pos['pnl'] and pos['pnl'] > 0:
+                    wins.append(pos)
+                elif pos['pnl'] and pos['pnl'] < 0:
+                    losses.append(pos)
+        
+        # Calculate statistics
+        if wins or losses:
+            summary['win_rate'] = len(wins) / (len(wins) + len(losses)) * 100
+            
+        if wins:
+            summary['average_win'] = sum(w['pnl'] for w in wins) / len(wins)
+            summary['best_trade'] = max(wins, key=lambda x: x['pnl'])
+            
+        if losses:
+            summary['average_loss'] = sum(l['pnl'] for l in losses) / len(losses)
+            summary['worst_trade'] = min(losses, key=lambda x: x['pnl'])
+        
+        return summary 

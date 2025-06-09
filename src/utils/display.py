@@ -956,12 +956,14 @@ def _wrap_text(text: str, width: int) -> str:
 # --- NEW: Position Management Summary Table ---
 def print_position_management_summary(execution_results: Dict[str, Any]) -> None:
     """
-    Print a summary table of position management actions taken.
+    Print an enhanced summary table of position management actions with tracking details.
     
     Args:
         execution_results: The result dictionary from PositionManagementAgent.execute_management_actions.
     """
-    print(f"\n{Fore.WHITE}{Style.BRIGHT}POSITION MANAGEMENT SUMMARY:{Style.RESET_ALL}")
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}📊 ENHANCED POSITION MANAGEMENT SUMMARY{Style.RESET_ALL}")
+    print("="*90)
+    
     if not execution_results:
         print(f"{Fore.YELLOW}No position management actions were executed or results available.{Style.RESET_ALL}")
         return
@@ -1005,9 +1007,24 @@ def print_position_management_summary(execution_results: Dict[str, Any]) -> None
                     
                 wrapped_message = _wrap_text(message, 40)
                     
+                # Enhanced details for specific action types
+                action_details = ""
+                if action.lower() == "adjust stop":
+                    if details and 'trailing_active' in details:
+                        action_details = "🎯 Trailing" if details['trailing_active'] else "🛑 Fixed"
+                elif action.lower() == "scale in":
+                    action_details = "📈 Adding"
+                elif action.lower() == "scale out":
+                    action_details = "💰 Profit"
+                elif action.lower() == "stop loss":
+                    action_details = "🚨 Risk Mgmt"
+                elif action.lower() == "take profit":
+                    action_details = "✅ Target Hit"
+                
                 table_data.append([
                     f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
                     f"{status_color}{action}{Style.RESET_ALL}",
+                    f"{Fore.WHITE}{action_details}{Style.RESET_ALL}",
                     f"{status_color}{status}{Style.RESET_ALL}",
                     f"{Fore.WHITE}{qty_str}{Style.RESET_ALL}",
                     f"{Fore.WHITE}{order_id_short}{Style.RESET_ALL}",
@@ -1022,6 +1039,7 @@ def print_position_management_summary(execution_results: Dict[str, Any]) -> None
              table_data.append([
                  f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
                  f"{status_color}ANALYSIS ERROR{Style.RESET_ALL}",
+                 f"{Fore.RED}❌ Error{Style.RESET_ALL}",
                  f"{status_color}{status}{Style.RESET_ALL}",
                  "-",
                  "-",
@@ -1030,12 +1048,20 @@ def print_position_management_summary(execution_results: Dict[str, Any]) -> None
 
     headers = [
         f"{Fore.WHITE}Ticker", 
-        "Management Action", 
+        "Action", 
+        "Type",
         "Status", 
         "Qty", 
         "Order ID", 
-        "Message/Details"
+        "Details/Reason"
     ]
     print(tabulate(table_data, headers=headers, tablefmt="grid"))
+    
+    # Add summary statistics
+    total_actions = len(table_data)
+    successful_actions = sum(1 for row in table_data if 'SUCCESS' in row[3] or 'EXECUTED' in row[3])
+    
+    print(f"\n📈 Actions Summary: {Fore.GREEN}{successful_actions}{Style.RESET_ALL}/{total_actions} successful")
+    print("="*90)
 
 # --- End Options Trading Display Functions ---
