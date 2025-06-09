@@ -586,7 +586,7 @@ class TradingManager:
         finally:
             # Schedule position management to run 3 minutes after this cycle finishes
             if cycle_result and cycle_result['status'] != 'skipped':
-                delay_minutes = 1
+                delay_minutes = 0
                 run_time = datetime.now() + timedelta(minutes=delay_minutes)
                 self.pending_pos_mgmt_time = run_time
                 logger.info(f"Trading cycle finished. Scheduling position management to run at {run_time.strftime('%Y-%m-%d %H:%M:%S')}")
