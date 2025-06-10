@@ -90,7 +90,8 @@ def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
         new_prices = PriceResponse(**resp.json()).prices
         raw = [p.model_dump() for p in new_prices]
         _cache.set_prices(ticker, raw)
-        cached.extend(raw)
+        # Re-fetch from cache to avoid duplicates in memory
+        cached = _cache.get_prices(ticker) or []
 
     result = [Price(**p) for p in cached if start_date <= p['time'] <= end_date]
     return sorted(result, key=lambda x: x.time)
