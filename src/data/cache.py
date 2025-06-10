@@ -145,7 +145,7 @@ class Cache:
             logger.info("Market data tables cleared successfully (position management data preserved)")
             return True
     
-    def clear_old_market_data(self, hours_old: int = 1):
+    def clear_old_market_data(self, hours_old: float = 1.167):
         """Clear market data older than specified hours."""
         from datetime import datetime, timedelta
         
