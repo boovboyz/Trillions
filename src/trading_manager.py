@@ -367,8 +367,8 @@ class TradingManager:
             # Clear old market data to ensure fresh analysis (preserve position management data)
             try:
                 cache = get_cache()
-                cache.clear_old_market_data(hours_old=1)
-                logger.info("Cleared market data older than 1 hour to ensure fresh analysis")
+                cache.clear_old_market_data(hours_old=1.167)
+                logger.info("Cleared market data older than 1 hour 10 minutes to ensure fresh analysis")
             except Exception as e:
                 logger.warning(f"Failed to clear old market data: {e}")
             
