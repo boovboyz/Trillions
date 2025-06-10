@@ -288,11 +288,8 @@ class TradingManager:
             # Position management is now scheduled dynamically after trading cycle
         
         # Run trading cycle immediately if requested
-        if questionary.confirm(
-            "Do you want to run an initial trading cycle now?",
-            default=True
-        ).ask():
-            self.run_trading_cycle()
+        
+        self.run_trading_cycle()
         
         logger.info("Trading Manager started. Next scheduled run: %s", self.next_scheduled_run)
         
